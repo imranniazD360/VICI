@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.1.0"
+VERSION="1.2.0"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -86,6 +86,7 @@ SKIP_FIREWALL=0
 LEGACY_PASSWORDS=0
 STOP_CONFLICTS=0
 KEEP_CONFLICTS=0
+LAB=0
 COMPILE_JOBS="$(nproc 2>/dev/null || echo 2)"
 
 FAIL_COUNT=0
@@ -188,7 +189,8 @@ ${C_BOLD}OPTIONS${C_RST}
   --skip-asterisk-build   Do not compile Asterisk (use existing 18.x)
   --skip-firewall         Do not touch firewalld / iptables
   --legacy-passwords      Use historic VICIdial defaults (cron/1234) — insecure
-  --jobs N                Parallel compile jobs (default: nproc)
+  --lab                   One-call test box (2 CPU / 4 GB Leap 16 OK)
+  --jobs N                Parallel compile jobs (default: nproc; lab uses 1)
   --help                  Show this help
 
 ${C_BOLD}EXAMPLES${C_RST}
@@ -196,15 +198,18 @@ ${C_BOLD}EXAMPLES${C_RST}
   $SCRIPT_NAME detect
   $SCRIPT_NAME check
 
-  # Hetzner / stock OpenSUSE Leap 15.6 (no ISO download)
+  # Hetzner / stock OpenSUSE Leap 15.6 or 16.0 (no ISO download)
   $SCRIPT_NAME install --role express --yes --stop-conflicts
+
+  # Small test VM (2 CPU, 4 GB, Leap 16) — one call, not production
+  $SCRIPT_NAME install --lab --role express --yes --stop-conflicts
 
   # Import an old VICIdial dump and walk schema upgrades to 2.14 / ${REQ_DB_SCHEMA_TARGET}
   $SCRIPT_NAME migrate --dump /root/old-asterisk.sql.gz --yes
 
 ${C_BOLD}NOTES${C_RST}
   * No ViciBox ISO is downloaded, mounted, or required.
-  * On Hetzner dedicated: use Rescue installimage to install OpenSUSE Leap 15.6, then this script.
+  * Leap 15.6 or 16.0. A 2-core / 4 GB box is a lab profile (one test call), not production.
   * Detection always runs before install or migrate.
   * Use 'zypper up' only. Never 'zypper dup' on a ViciDial box.
   * After a new MariaDB 10.11 database, explicit_defaults_for_timestamp=Off is required.
@@ -275,12 +280,12 @@ rand_pass() {
 }
 
 unit_state() {
-  local unit="$1"
+  local unit="$1" s=""
   if have_cmd systemctl; then
-    systemctl is-active "$unit" 2>/dev/null || echo "inactive"
-  else
-    echo "unknown"
+    s="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    s="$(printf '%s' "$s" | tr -d '\r' | awk 'NF{print; exit}')"
   fi
+  printf '%s' "${s:-unknown}"
 }
 
 unit_enabled() {
@@ -332,11 +337,28 @@ mysql_file() {
   mysql -u root "${extra[@]}" "$@"
 }
 
+host_name() {
+  local n=""
+  if have_cmd hostname; then
+    n="$(hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "$n" ]] && have_cmd hostnamectl; then
+    n="$(hostnamectl --static 2>/dev/null || true)"
+  fi
+  if [[ -z "$n" && -r /etc/hostname ]]; then
+    n="$(tr -d ' \t\r\n' </etc/hostname)"
+  fi
+  if [[ -z "$n" ]]; then
+    n="$(uname -n 2>/dev/null || echo unknown-host)"
+  fi
+  printf '%s' "$n"
+}
+
 detect_primary_ip() {
   local ip=""
   ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  if [[ -z "$ip" ]]; then
-    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$ip" && -n "$(ip -4 addr show 2>/dev/null)" ]]; then
+    ip="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}' | cut -d/ -f1)"
   fi
   printf '%s' "$ip"
 }
@@ -395,6 +417,7 @@ parse_args() {
       --skip-asterisk-build) SKIP_ASTERISK_BUILD=1; shift ;;
       --skip-firewall) SKIP_FIREWALL=1; shift ;;
       --legacy-passwords) LEGACY_PASSWORDS=1; shift ;;
+      --lab) LAB=1; shift ;;
       --jobs) COMPILE_JOBS="${2:-}"; shift 2 ;;
       -h|--help) COMMAND="help"; shift ;;
       *) die "Unknown option: $1" ;;
@@ -604,7 +627,7 @@ evaluate_requirements() {
   elif [[ "$IS_VICIBOX" -eq 1 ]]; then
     os_ok="PASS"
   fi
-  add_req "$os_ok" "Operating system" "$OS_NAME" "openSUSE Leap ${REQ_OS_VERSION_MIN}+" "ViciBox 12 is Leap 15.6"
+  add_req "$os_ok" "Operating system" "$OS_NAME" "openSUSE Leap 15.6 or 16.0" "ViciBox 12 was 15.6; Leap 16.0 is OK for a lab/test call"
 
   local arch_ok="FAIL"
   [[ "$ARCH" == "x86_64" ]] && arch_ok="PASS"
@@ -612,13 +635,14 @@ evaluate_requirements() {
 
   local cpu_ok="FAIL"
   if [[ "$CPU_CORES" -ge "$REQ_CPU_CORES_MIN" ]]; then cpu_ok="PASS"
-  elif [[ "$CPU_CORES" -ge 2 ]]; then cpu_ok="WARN"; fi
-  add_req "$cpu_ok" "CPU cores" "$CPU_CORES" "${REQ_CPU_CORES_MIN}+" "Express ≤20 agents needs 4+ cores"
+  elif [[ "$CPU_CORES" -ge 1 ]]; then cpu_ok="WARN"; fi
+  add_req "$cpu_ok" "CPU cores" "$CPU_CORES" "${REQ_CPU_CORES_MIN}+ production / 1+ lab" "2 cores is enough for one test call"
 
   local ram_ok="FAIL"
   if [[ "$RAM_MB" -ge 15360 ]]; then ram_ok="PASS"
-  elif [[ "$RAM_MB" -ge "$REQ_RAM_MB_MIN" ]]; then ram_ok="WARN"; fi
-  add_req "$ram_ok" "RAM" "${RAM_MB} MB" "${REQ_RAM_MB_MIN} MB min / ${REQ_RAM_MB_RECOMMENDED} MB rec" "SSD + 16 GB ECC recommended"
+  elif [[ "$RAM_MB" -ge "$REQ_RAM_MB_MIN" ]]; then ram_ok="WARN"
+  elif [[ "$RAM_MB" -ge 1536 ]]; then ram_ok="WARN"; fi
+  add_req "$ram_ok" "RAM" "${RAM_MB} MB" "1536 MB lab / ${REQ_RAM_MB_MIN} MB production" "4 GB is a one-call lab box; 16 GB ECC for production"
 
   local disk_ok="FAIL"
   if [[ -n "$DISK_GB" && "$DISK_GB" -ge 500 ]]; then disk_ok="PASS"
@@ -634,7 +658,7 @@ evaluate_requirements() {
   local php_ok="WARN" php_mm=""
   if [[ -n "$PHP_VERSION" ]]; then
     php_mm="$(printf '%s' "$PHP_VERSION" | awk -F. '{print $1"."$2}')"
-    if version_ge "$php_mm" "$REQ_PHP_MIN" && ! version_ge "$php_mm" "8.4"; then
+    if version_ge "$php_mm" "$REQ_PHP_MIN" && ! version_ge "$php_mm" "8.5"; then
       php_ok="PASS"
     elif version_ge "$php_mm" "8.0"; then
       php_ok="WARN"
@@ -646,7 +670,7 @@ evaluate_requirements() {
     php_ok="WARN"
     PHP_SAPI="-"
   fi
-  add_req "$php_ok" "PHP" "${PHP_VERSION}${PHP_SAPI:+ ($PHP_SAPI)}" "${REQ_PHP_MIN}.x (max ${REQ_PHP_MAX})" "mysql_* gone since PHP 7; ViciBox 12 ships 8.2. Missing packages are installed automatically."
+  add_req "$php_ok" "PHP" "${PHP_VERSION}${PHP_SAPI:+ ($PHP_SAPI)}" "${REQ_PHP_MIN}+ (8.2–8.4)" "Leap 16 may ship PHP 8.4; missing packages are installed automatically."
 
   # Asterisk — missing is installable; 11/13 need a rebuild (FAIL unless --force).
   local ast_ok="WARN" ast_major=""
@@ -697,7 +721,7 @@ evaluate_requirements() {
   fi
   add_req "$sec_ok" "MAC / LSM" "SELinux=${SELINUX} AppArmor=${APPARMOR}" "SELinux off; AppArmor permissive" "VICIdial assumes SELinux is disabled"
 
-  add_req "PASS" "Install method" "scratch (packages + source)" "no ViciBox ISO" "Hetzner/VPS path: Leap 15.6 then this script"
+  add_req "PASS" "Install method" "scratch (packages + source)" "no ViciBox ISO" "Leap 15.6 or 16.0 lab/Hetzner path"
 }
 
 print_service_table() {
@@ -728,7 +752,7 @@ print_service_table() {
 print_detect_summary() {
   header "Host inventory"
   cat <<EOF
-  Hostname        : $(hostname)
+  Hostname        : $(host_name)
   OS              : ${OS_NAME} (${OS_ID} ${OS_VERSION})
   Kernel          : ${KERNEL}
   Arch            : ${ARCH}
@@ -744,6 +768,7 @@ print_detect_summary() {
   DB schema       : ${DB_SCHEMA:-none}
   AppArmor        : ${APPARMOR}
   SELinux         : ${SELINUX}
+  Lab profile     : $([[ ${LAB:-0} -eq 1 ]] && echo "yes (one test call)" || echo no)
   Log             : ${LOG_FILE}
 EOF
 }
@@ -752,17 +777,33 @@ write_detect_report() {
   mkdir -p "$(dirname "$REPORT_FILE")"
   {
     echo "VICIdial 12 detection report — $(date -Is)"
-    echo "Host: $(hostname)  OS: ${OS_NAME}"
+    echo "Host: $(host_name)  OS: ${OS_NAME}"
     echo
     echo "PASS=${PASS_COUNT} WARN=${WARN_COUNT} FAIL=${FAIL_COUNT} CONFLICTS=${CONFLICT_COUNT}"
   } > "$REPORT_FILE"
   info "Wrote detection report: ${REPORT_FILE}"
 }
 
+maybe_enable_lab() {
+  if [[ "$LAB" -eq 0 ]]; then
+    if [[ "${RAM_MB:-0}" -lt 6144 || "${CPU_CORES:-0}" -lt 4 ]]; then
+      LAB=1
+    fi
+  fi
+  if [[ "$LAB" -eq 1 ]]; then
+    warn "Lab/test profile enabled (${CPU_CORES} cores, ${RAM_MB} MB RAM) — sized for one test call, not production"
+    if [[ "${COMPILE_JOBS}" -gt 1 ]]; then
+      COMPILE_JOBS=1
+      info "Asterisk compile jobs set to 1 to avoid OOM on a small box"
+    fi
+  fi
+}
+
 phase_detect() {
   header "Phase 1 — Detect everything"
   detect_os
   detect_hardware
+  maybe_enable_lab
   detect_php
   detect_asterisk
   detect_mariadb
@@ -822,6 +863,19 @@ zypper_n() {
   run zypper --non-interactive --gpg-auto-import-keys "$@"
 }
 
+zypper_try_in() {
+  local p rc=0
+  for p in "$@"; do
+    if zypper --non-interactive --gpg-auto-import-keys in -y "$p" >/dev/null 2>&1; then
+      info "Installed $p"
+    else
+      warn "Package not available (Leap ${OS_VERSION}): $p"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
 ensure_opensuse_repos() {
   have_cmd zypper || die "zypper not found — this installer is for OpenSUSE"
   info "Refreshing zypper metadata (never using 'zypper dup')"
@@ -830,32 +884,36 @@ ensure_opensuse_repos() {
 
 install_base_packages() {
   header "Phase 2 — Base OpenSUSE packages (box)"
-  local pkgs=(
+  local critical=(
     bash coreutils util-linux procps iproute2 iputils
     wget curl tar gzip bzip2 unzip xz patch
     git subversion gcc gcc-c++ make autoconf automake libtool
-    ncurses-devel libxml2-devel openssl-devel sqlite3-devel
-    libuuid-devel speex-devel libcurl-devel unixODBC-devel
-    kernel-devel kernel-default-devel
-    screen unzip sox nmap bind-utils lsof psmisc
-    chrony timezone
-    perl perl-DBI perl-DBD-mysql perl-Net-Telnet perl-Time-HiRes
-    perl-IO-Socket-SSL perl-libwww-perl perl-Digest-MD5
-    perl-YAML perl-JSON perl-Try-Tiny
-    python3
-    pv
+    screen sox bind-utils lsof psmisc chrony python3 perl
   )
-  # Optional packages that differ across Leap point releases.
-  local optional=(
-    perl-Mail-Sendmail perl-Crypt-Eksblowfish lame mpg123
+  zypper_n in -y "${critical[@]}" || {
+    warn "Batch install had missing names; retrying one by one"
+    zypper_try_in "${critical[@]}" || true
+  }
+  have_cmd gcc || die "gcc is required to compile Asterisk 18"
+  have_cmd make || die "make is required to compile Asterisk 18"
+  have_cmd svn || have_cmd git || die "subversion or git is required to fetch VICIdial"
+
+  local devel=(
+    ncurses-devel libxml2-devel openssl-devel libopenssl-devel
+    sqlite3-devel sqlite-devel libuuid-devel speex-devel libcurl-devel
+    unixODBC-devel kernel-devel kernel-default-devel
     libsrtp-devel jansson-devel newt-devel speexdsp-devel
-    sipsak iftop htop iotop
   )
-  zypper_n in -y "${pkgs[@]}" || die "Required package install failed"
-  local p
-  for p in "${optional[@]}"; do
-    zypper_n in -y "$p" || warn "Optional package missing: $p"
-  done
+  zypper_try_in "${devel[@]}" || true
+
+  local perlmods=(
+    perl-DBI perl-DBD-mysql perl-DBD-MariaDB perl-Net-Telnet perl-Time-HiRes
+    perl-IO-Socket-SSL perl-libwww-perl perl-Digest-MD5
+    perl-YAML perl-JSON perl-Try-Tiny perl-Mail-Sendmail hostname
+    lame mpg123 pv nmap sipsak
+  )
+  zypper_try_in "${perlmods[@]}" || true
+
   if have_cmd systemctl; then
     run systemctl enable --now chronyd || warn "Could not enable chronyd"
   fi
@@ -870,7 +928,12 @@ install_php() {
     php8-zlib php8-session php8-posix php8-sockets
     apache2 apache2-mod_php8 apache2-utils
   )
-  zypper_n in -y "${php_pkgs[@]}" || die "PHP/Apache package install failed"
+  zypper_n in -y "${php_pkgs[@]}" || {
+    warn "Some PHP modules missing on Leap ${OS_VERSION}; installing what exists"
+    zypper_try_in "${php_pkgs[@]}" || true
+  }
+  zypper_try_in apache2 apache2-mod_php8 apache2-utils || true
+  have_cmd php || have_cmd php8 || die "PHP did not install. On Leap 16 try: zypper se php8"
 
   # Leap 15.6 php8 is 8.2. Re-detect.
   detect_php
@@ -892,7 +955,7 @@ install_php() {
         -e 's/^short_open_tag = .*/short_open_tag = On/' \
         -e 's/^max_execution_time = .*/max_execution_time = 330/' \
         -e 's/^max_input_time = .*/max_input_time = 360/' \
-        -e 's/^memory_limit = .*/memory_limit = 256M/' \
+        -e 's/^memory_limit = .*/memory_limit = 128M/' \
         -e 's/^post_max_size = .*/post_max_size = 64M/' \
         -e 's/^upload_max_filesize = .*/upload_max_filesize = 64M/' \
         -e 's/^default_socket_timeout = .*/default_socket_timeout = 360/' \
@@ -914,30 +977,37 @@ install_php() {
 
 configure_mariadb() {
   header "Phase 4 — MariaDB ${REQ_MARIADB_MIN} + TIMESTAMP fix"
-  zypper_n in -y mariadb mariadb-client mariadb-tools || die "MariaDB install failed"
+  zypper_n in -y mariadb mariadb-client mariadb-tools || zypper_try_in mariadb mariadb-client || die "MariaDB install failed"
   mkdir -p /etc/my.cnf.d
+  local innodb_pool="256M" key_buf="64M" max_conn="80" tmp_tbl="64M"
+  if [[ "${RAM_MB:-0}" -ge 12000 ]]; then
+    innodb_pool="1G"; key_buf="512M"; max_conn="500"; tmp_tbl="128M"
+  elif [[ "${RAM_MB:-0}" -ge 7000 ]]; then
+    innodb_pool="512M"; key_buf="128M"; max_conn="200"; tmp_tbl="96M"
+  fi
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    cat > /etc/my.cnf.d/vicidial.cnf <<'CNF'
+    cat > /etc/my.cnf.d/vicidial.cnf <<CNF
 [mysqld]
-max_connections = 500
+max_connections = ${max_conn}
 open_files_limit = 65535
-table_open_cache = 4096
-key_buffer_size = 512M
+table_open_cache = 1024
+key_buffer_size = ${key_buf}
 max_allowed_packet = 64M
 query_cache_size = 0
 query_cache_type = 0
-innodb_buffer_pool_size = 1G
+innodb_buffer_pool_size = ${innodb_pool}
 innodb_flush_log_at_trx_commit = 2
 innodb_flush_method = O_DIRECT
 innodb_file_per_table = 1
-tmp_table_size = 128M
-max_heap_table_size = 128M
+tmp_table_size = ${tmp_tbl}
+max_heap_table_size = ${tmp_tbl}
 skip-name-resolve
 bind-address = 127.0.0.1
 explicit_defaults_for_timestamp = Off
 character-set-server = utf8
 collation-server = utf8_unicode_ci
 CNF
+    info "MariaDB innodb_buffer_pool_size=${innodb_pool} (RAM ${RAM_MB} MB)"
   fi
   # Official ViciBox 12.0.1/12.0.2 bugfix location as well.
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -1014,6 +1084,9 @@ install_dahdi() {
   header "Phase 5 — DAHDI timing (Asterisk MeetMe)"
   # Prefer OBS packages; fall back to source.
   if zypper se -s dahdi-linux >/dev/null 2>&1; then
+  local leap_repo="15.6"
+  [[ "${OS_VERSION}" == 16* ]] && leap_repo="16.0"
+  zypper_n ar -f "https://download.opensuse.org/repositories/home:vicidial/${leap_repo}/home:vicidial.repo" home-vicidial 2>/dev/null || \
     zypper_n ar -f https://download.opensuse.org/repositories/home:vicidial/15.6/home:vicidial.repo home-vicidial 2>/dev/null || true
     zypper_n ref home-vicidial || true
     zypper_n in -y dahdi-linux dahdi-tools || warn "OBS DAHDI packages not available"
@@ -1414,7 +1487,7 @@ cmd_install() {
   if [[ "$IS_VICIBOX" -eq 1 ]]; then
     warn "ViciBox tools are present, but ISO/vicibox-express is skipped. Installing from packages + source."
   fi
-  confirm "Install VICIdial 12 scratch stack (${ROLE}) on $(hostname)? (no ISO)" || die "Aborted"
+  confirm "Install VICIdial 12 scratch stack (${ROLE}) on $(host_name)? (no ISO)" || die "Aborted"
 
   ensure_opensuse_repos
   case "$ROLE" in

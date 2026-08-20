@@ -56,7 +56,15 @@ asterisk -r
 
 Open `http://YOUR.SERVER.IP/vicidial/welcome.php` — default login **6666 / 1234** (change it). Credentials: `/root/vicidial-credentials.txt`.
 
-Hetzner Cloud: create a VM, choose openSUSE Leap 15.6 if listed; otherwise install Leap 15.6 from Hetzner’s OS images. Do not attach the ViciBox ISO.
+Hetzner Cloud: create a VM, choose openSUSE Leap **15.6 or 16.0**. Do not attach the ViciBox ISO.
+
+A **2 CPU / 4 GB / Leap 16.0** box is a lab profile. The script will warn (not fail) and compile Asterisk with one job so it can place a single test call. That is not a production dialer.
+
+```bash
+./install-vicidial12-opensuse.sh install --lab --role express --yes --stop-conflicts
+```
+
+(`--lab` is optional: 4 GB RAM auto-enables the same profile.)
 
 ## What the script does
 
