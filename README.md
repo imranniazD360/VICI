@@ -6,9 +6,10 @@ The script detects services first, then builds the ViciBox 12.0.2 stack from pac
 
 | Layer | Installed |
 | --- | --- |
-| OS | openSUSE Leap **15.6** (Hetzner `installimage` or any Leap 15.6 VPS) |
-| PHP | **8.2** + Apache |
-| Database | MariaDB **10.11+** with `explicit_defaults_for_timestamp = Off` |
+| OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |
+| Web | **Apache** (`apache2`) — checked, installed if missing, enabled, started, port 80 verified |
+| PHP | **8.2–8.4** + `apache2-mod_php8` |
+| Database | MariaDB **10.11+** — same install/enable/start/ping pattern + `explicit_defaults_for_timestamp = Off` |
 | Telephony | Asterisk **18** with the five VICIdial patches + DAHDI |
 | Application | VICIdial **2.14** SVN trunk, DB schema **1729+** |
 
@@ -69,10 +70,11 @@ A **2 CPU / 4 GB / Leap 16.0** box is a lab profile. The script will warn (not f
 ## What the script does
 
 1. **Detect services** — Apache, nginx, PHP-FPM, MariaDB/MySQL, PostgreSQL, Asterisk, DAHDI, FreeSWITCH, Kamailio, Postfix, firewalld, Docker, chronyd, existing VICIdial, ports 80/443/3306/5038/5060/4569.
-2. **Requirements matrix** — CPU, RAM, disk, OS, PHP, Asterisk, MariaDB, schema, time sync, SELinux/AppArmor.
-3. **Conflicts** — stop nginx/MySQL/FreeSWITCH with `--stop-conflicts`.
-4. **Scratch install** — zypper packages, PHP 8.2, MariaDB TIMESTAMP fix, DAHDI, patched Asterisk 18, SVN, schema, crontab, firewall.
-5. **Database migration** — backup, optional dump import, then `upgrade_2.0.5` → `2.2` → `2.4` → `2.6` → `2.8` → `2.10` → `2.12` → `2.14` (no skipped majors).
+2. **Required-service plan** — for the selected `--role`, print whether Apache / MariaDB / Asterisk / chronyd need **INSTALL + ENABLE + START** (same lifecycle as the database).
+3. **Requirements matrix** — CPU, RAM, disk, OS, PHP, Apache, Asterisk, MariaDB, schema, time sync, SELinux/AppArmor.
+4. **Conflicts** — stop nginx/MySQL/FreeSWITCH with `--stop-conflicts`.
+5. **Scratch install** — zypper packages, PHP 8.2–8.4, Apache enable/start/port 80, MariaDB TIMESTAMP fix + ping, DAHDI, patched Asterisk 18, SVN, schema, crontab, firewall.
+6. **Database migration** — backup, optional dump import, then `upgrade_2.0.5` → `2.2` → `2.4` → `2.6` → `2.8` → `2.10` → `2.12` → `2.14` (no skipped majors).
 
 ISO commands (`download-iso`, `write-usb`, `--iso`) are rejected on purpose.
 
@@ -86,7 +88,7 @@ ISO commands (`download-iso`, `write-usb`, `--iso`) are rejected on purpose.
 | --- | --- |
 | `express` | Database + web + telephony on one box (≤ ~20 agents) |
 | `database` | MariaDB, schema, TIMESTAMP fix |
-| `web` | Apache + PHP 8.2 + VICIdial web files |
+| `web` | Apache (install/enable/start/:80) + PHP 8.2–8.4 + VICIdial web files |
 | `telephony` | DAHDI + Asterisk 18 + keepalives |
 | `archive` | vsftpd archive role |
 

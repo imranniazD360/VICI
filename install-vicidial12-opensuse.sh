@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.2.1"
+VERSION="1.3.0"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -168,7 +168,7 @@ ${C_BOLD}USAGE${C_RST}
 ${C_BOLD}COMMANDS${C_RST}
   detect         Scan OS, hardware, services, PHP, Asterisk, and database
   check          Detect + print the requirements matrix (no changes)
-  install        Scratch install: box → PHP → MariaDB → DAHDI → Asterisk → VICIdial
+  install        Scratch install: box → Apache/PHP → MariaDB → DAHDI → Asterisk → VICIdial
   migrate        Backup and upgrade/import an existing VICIdial database
   help           Show this help
 
@@ -211,6 +211,8 @@ ${C_BOLD}NOTES${C_RST}
   * No ViciBox ISO is downloaded, mounted, or required.
   * Leap 15.6 or 16.0. A 2-core / 4 GB box is a lab profile (one test call), not production.
   * Detection always runs before install or migrate.
+  * Required services (Apache, MariaDB, chronyd) are checked first: if missing
+    they are installed, enabled, started, and verified (same pattern as the DB).
   * Use 'zypper up' only. Never 'zypper dup' on a ViciDial box.
   * After a new MariaDB 10.11 database, explicit_defaults_for_timestamp=Off is required.
   * Default web login after a fresh install is 6666 / 1234 — change it immediately.
@@ -289,12 +291,12 @@ unit_state() {
 }
 
 unit_enabled() {
-  local unit="$1"
+  local unit="$1" s=""
   if have_cmd systemctl; then
-    systemctl is-enabled "$unit" 2>/dev/null || echo "disabled"
-  else
-    echo "unknown"
+    s="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    s="$(printf '%s' "$s" | tr -d '\r' | awk 'NF{print; exit}')"
   fi
+  printf '%s' "${s:-disabled}"
 }
 
 pkg_installed() {
@@ -309,14 +311,109 @@ pkg_installed() {
 listening_on() {
   local port="$1" proto="${2:-tcp}"
   if have_cmd ss; then
-    ss -lntuH 2>/dev/null | awk -v p=":${port}" -v proto="$proto" '
-      index($0, p) && (proto == "any" || tolower($1) ~ proto) { found=1 }
+    ss -lntuH 2>/dev/null | awk -v port="$port" -v proto="$proto" '
+      {
+        if (proto != "any" && tolower($1) !~ proto) next
+        n = split($4, addr, ":")
+        if (n && addr[n] == port) found=1
+      }
       END { exit found ? 0 : 1 }'
   elif have_cmd netstat; then
-    netstat -lntu 2>/dev/null | grep -q ":${port}"
+    netstat -lntu 2>/dev/null | awk -v port=":${port}$" '$0 ~ port { found=1 } END { exit found ? 0 : 1 }'
   else
     return 1
   fi
+}
+
+unit_exists() {
+  local unit="$1"
+  have_cmd systemctl || return 1
+  systemctl cat "${unit}.service" >/dev/null 2>&1
+}
+
+wait_for_unit_active() {
+  local unit="$1" timeout="${2:-30}" i=0
+  while [[ "$i" -lt "$timeout" ]]; do
+    if [[ "$(unit_state "$unit")" == "active" ]]; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_listen() {
+  local port="$1" timeout="${2:-20}" i=0
+  while [[ "$i" -lt "$timeout" ]]; do
+    if listening_on "$port" any; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+apache_unit_name() {
+  if unit_exists apache2; then
+    printf '%s' apache2
+  elif unit_exists httpd; then
+    printf '%s' httpd
+  else
+    printf '%s' apache2
+  fi
+}
+
+db_unit_name() {
+  if unit_exists mariadb; then
+    printf '%s' mariadb
+  elif unit_exists mysql; then
+    printf '%s' mysql
+  elif unit_exists mysqld; then
+    printf '%s' mysqld
+  else
+    printf '%s' mariadb
+  fi
+}
+
+ensure_unit() {
+  local unit="$1" timeout="${2:-30}"
+  have_cmd systemctl || { warn "systemctl not found; cannot start ${unit}"; return 1; }
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "(dry-run) would systemctl enable --now ${unit}"
+    return 0
+  fi
+  run systemctl enable "$unit" || warn "Could not enable ${unit} at boot"
+  if [[ "$(unit_state "$unit")" == "active" ]]; then
+    run systemctl reload-or-restart "$unit" || run systemctl restart "$unit" || true
+  else
+    run systemctl start "$unit" || run systemctl restart "$unit" || true
+  fi
+  if wait_for_unit_active "$unit" "$timeout"; then
+    ok "${unit} is active (enabled=$(unit_enabled "$unit"))"
+    return 0
+  fi
+  fail "${unit} did not become active (state=$(unit_state "$unit"))"
+  systemctl status "$unit" --no-pager -l 2>/dev/null | tail -n 25 | tee -a "$LOG_FILE" || true
+  journalctl -u "$unit" -n 30 --no-pager 2>/dev/null | tee -a "$LOG_FILE" || true
+  return 1
+}
+
+wait_for_mariadb_ping() {
+  local timeout="${1:-45}" i=0
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  while [[ "$i" -lt "$timeout" ]]; do
+    if have_cmd mysqladmin && mysqladmin ping --silent >/dev/null 2>&1; then
+      return 0
+    fi
+    if have_cmd mariadb-admin && mariadb-admin ping --silent >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 mysql_cli() {
@@ -456,6 +553,9 @@ OS_ID=""; OS_VERSION=""; OS_NAME=""; KERNEL=""; ARCH=""
 CPU_CORES=0; RAM_MB=0; DISK_GB=0; DISK_ROTTING="unknown"
 PHP_VERSION=""; PHP_SAPI=""
 ASTERISK_VERSION=""; MARIADB_VERSION=""
+APACHE_PKG="not installed"; APACHE_UNIT="apache2"; APACHE_VERSION=""
+APACHE_ACTIVE="unknown"; APACHE_ENABLED="unknown"
+APACHE_LISTEN80="no"; APACHE_LISTEN443="no"
 VICIBOX_PRESENT=0; VICIDIAL_PRESENT=0
 DB_SCHEMA=""; DB_CODE_VERSION=""
 APPARMOR="unknown"; SELINUX="unknown"
@@ -517,9 +617,45 @@ detect_mariadb() {
   elif have_cmd mariadb; then
     MARIADB_VERSION="$(mariadb -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
   fi
-  if have_cmd mysql && mysqladmin ping >/dev/null 2>&1; then
+  if have_cmd mysqladmin && mysqladmin ping --silent >/dev/null 2>&1; then
     DB_SCHEMA="$(mysql_exec -e "SELECT db_schema_version FROM ${DB_NAME}.system_settings LIMIT 1;" 2>/dev/null || true)"
     DB_CODE_VERSION="$(mysql_exec -e "SELECT version FROM ${DB_NAME}.system_settings LIMIT 1;" 2>/dev/null || true)"
+  elif have_cmd mariadb-admin && mariadb-admin ping --silent >/dev/null 2>&1; then
+    DB_SCHEMA="$(mysql_exec -e "SELECT db_schema_version FROM ${DB_NAME}.system_settings LIMIT 1;" 2>/dev/null || true)"
+    DB_CODE_VERSION="$(mysql_exec -e "SELECT version FROM ${DB_NAME}.system_settings LIMIT 1;" 2>/dev/null || true)"
+  fi
+}
+
+detect_apache() {
+  APACHE_UNIT="$(apache_unit_name)"
+  APACHE_ACTIVE="$(unit_state "$APACHE_UNIT")"
+  APACHE_ENABLED="$(unit_enabled "$APACHE_UNIT")"
+  APACHE_LISTEN80="no"
+  APACHE_LISTEN443="no"
+  APACHE_PKG="not installed"
+  APACHE_VERSION=""
+  if pkg_installed apache2; then
+    APACHE_PKG="apache2"
+  elif pkg_installed httpd; then
+    APACHE_PKG="httpd"
+  fi
+  local ver_out=""
+  if have_cmd httpd; then
+    ver_out="$(httpd -v 2>/dev/null || true)"
+  elif have_cmd apache2ctl; then
+    ver_out="$(apache2ctl -v 2>/dev/null || true)"
+  elif have_cmd apachectl; then
+    ver_out="$(apachectl -v 2>/dev/null || true)"
+  elif have_cmd apache2; then
+    ver_out="$(apache2 -v 2>/dev/null || true)"
+  fi
+  if [[ -n "$ver_out" ]]; then
+    APACHE_VERSION="$(printf '%s\n' "$ver_out" | awk -F'/' '/Server version/{print $2; exit}' | awk '{print $1}')"
+  fi
+  listening_on 80 any && APACHE_LISTEN80="yes"
+  listening_on 443 any && APACHE_LISTEN443="yes"
+  if [[ "$APACHE_PKG" == "not installed" && -n "$APACHE_VERSION" ]]; then
+    APACHE_PKG="present"
   fi
 }
 
@@ -610,6 +746,38 @@ detect_services() {
     fi
   done
 
+  # Always list required stack units, even when the package is not installed yet.
+  local req_name already row
+  for req_name in apache2 mariadb asterisk chronyd; do
+    already=0
+    for row in "${SERVICE_ROWS[@]+"${SERVICE_ROWS[@]}"}"; do
+      if [[ "${row%%|*}" == "$req_name" ]]; then
+        already=1
+        break
+      fi
+    done
+    [[ "$already" -eq 1 ]] && continue
+    for entry in "${SERVICE_CATALOG[@]}"; do
+      IFS='|' read -r name pkg ports level notes <<<"$entry"
+      if [[ "$name" == "$req_name" ]]; then
+        listening="no"
+        if [[ -n "$ports" && "$ports" != " " ]]; then
+          local p
+          IFS=',' read -ra plist <<<"$ports"
+          for p in "${plist[@]}"; do
+            p="$(trim "$p")"
+            [[ -z "$p" ]] && continue
+            if listening_on "$p" any; then
+              listening="yes"
+            fi
+          done
+        fi
+        SERVICE_ROWS+=("$name|$(unit_state "$name")|$(unit_enabled "$name")|$listening|$level|$notes")
+        break
+      fi
+    done
+  done
+
   # Catch anything else bound to VICIdial ports.
   local port
   for port in 80 443 3306 5038 5060 4569; do
@@ -690,6 +858,20 @@ evaluate_requirements() {
   fi
   add_req "$php_ok" "PHP" "${PHP_VERSION}${PHP_SAPI:+ ($PHP_SAPI)}" "${REQ_PHP_MIN}+ (8.2–8.4)" "Leap 16 may ship PHP 8.4; missing packages are installed automatically."
 
+  # Apache — missing is installable; installer enables and starts it like MariaDB.
+  local ap_ok="WARN" ap_found
+  ap_found="pkg=${APACHE_PKG} unit=${APACHE_UNIT} ${APACHE_ACTIVE} :80=${APACHE_LISTEN80}"
+  if [[ "$APACHE_ACTIVE" == "active" && "$APACHE_LISTEN80" == "yes" ]]; then
+    ap_ok="PASS"
+  elif [[ "$APACHE_PKG" != "not installed" || -n "$APACHE_VERSION" ]]; then
+    ap_ok="WARN"
+  else
+    APACHE_PKG="not installed"
+    ap_ok="WARN"
+    ap_found="not installed"
+  fi
+  add_req "$ap_ok" "Apache" "${APACHE_VERSION:-$ap_found}" "apache2 enabled + listening :80" "Missing Apache is installed, enabled, started, and verified automatically (same as MariaDB)."
+
   # Asterisk — missing is installable; 11/13 need a rebuild (FAIL unless --force).
   local ast_ok="WARN" ast_major=""
   if [[ -n "$ASTERISK_VERSION" ]]; then
@@ -715,7 +897,7 @@ evaluate_requirements() {
     MARIADB_VERSION="not installed"
     db_ok="WARN"
   fi
-  add_req "$db_ok" "MariaDB" "$MARIADB_VERSION" "${REQ_MARIADB_MIN}+" "TIMESTAMP implicit ON UPDATE broke in 10.11. Missing MariaDB is installed automatically."
+  add_req "$db_ok" "MariaDB" "$MARIADB_VERSION" "${REQ_MARIADB_MIN}+" "TIMESTAMP implicit ON UPDATE broke in 10.11. Missing MariaDB is installed, enabled, started, and ping-checked automatically."
 
   if [[ -n "$DB_SCHEMA" ]]; then
     local schema_ok="WARN"
@@ -767,6 +949,98 @@ print_service_table() {
   fi
 }
 
+role_needs_service() {
+  local name="$1"
+  case "$ROLE" in
+    express|all)
+      case "$name" in apache2|mariadb|asterisk|chronyd) return 0 ;; *) return 1 ;; esac
+      ;;
+    web)
+      case "$name" in apache2|chronyd) return 0 ;; *) return 1 ;; esac
+      ;;
+    database)
+      case "$name" in mariadb|chronyd) return 0 ;; *) return 1 ;; esac
+      ;;
+    telephony)
+      case "$name" in asterisk|dahdi|chronyd) return 0 ;; *) return 1 ;; esac
+      ;;
+    archive)
+      case "$name" in vsftpd|chronyd) return 0 ;; *) return 1 ;; esac
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+plan_required_service() {
+  local name="$1" pkg="$2" unit="$3" port="$4" note="$5"
+  local installed="no" active enabled listen="-" action needed="yes"
+  case "$name" in
+    apache2)
+      unit="${APACHE_UNIT:-$unit}"
+      if pkg_installed apache2 || pkg_installed httpd || [[ -n "${APACHE_VERSION}" ]]; then
+        installed="yes"
+      fi
+      ;;
+    mariadb)
+      unit="$(db_unit_name)"
+      if pkg_installed mariadb || have_cmd mysql || have_cmd mariadb; then
+        installed="yes"
+      fi
+      ;;
+    asterisk)
+      if pkg_installed asterisk || have_cmd asterisk; then
+        installed="yes"
+      fi
+      ;;
+    chronyd)
+      if pkg_installed chrony || have_cmd chronyd; then
+        installed="yes"
+      fi
+      ;;
+    *)
+      if pkg_installed "$pkg" || have_cmd "$name"; then
+        installed="yes"
+      fi
+      ;;
+  esac
+  active="$(unit_state "$unit")"
+  enabled="$(unit_enabled "$unit")"
+  if [[ -n "$port" ]]; then
+    listen="no"
+    listening_on "$port" any && listen="yes"
+  fi
+  if ! role_needs_service "$name"; then
+    needed="no"
+    action="skip (not required for --role ${ROLE})"
+  elif [[ "$installed" == "no" ]]; then
+    action="NEED INSTALL + ENABLE + START"
+  elif [[ "$active" != "active" ]]; then
+    action="NEED ENABLE + START"
+  elif [[ -n "$port" && "$listen" != "yes" ]]; then
+    action="NEED START (port ${port} not listening)"
+  else
+    action="OK (running)"
+  fi
+  ACTION_ROWS+=("$name|$installed|$active|$enabled|$listen|$action")
+  printf '  %-12s %-12s %-10s %-12s %-8s %s\n' "$name" "$installed" "$active" "$enabled" "$listen" "$action"
+  : "${note}"
+}
+
+print_required_services() {
+  ACTION_ROWS=()
+  header "Required services — check, install, enable, start"
+  info "Role ${ROLE}: missing units are installed and started the same way as MariaDB."
+  printf '  %-12s %-12s %-10s %-12s %-8s %s\n' "SERVICE" "INSTALLED" "ACTIVE" "ENABLED" "LISTEN" "ACTION"
+  printf '  %-12s %-12s %-10s %-12s %-8s %s\n' "-------" "---------" "------" "-------" "------" "------"
+  plan_required_service apache2 apache2 apache2 80 "VICIdial web UI (Apache + mod_php)"
+  plan_required_service mariadb mariadb mariadb 3306 "VICIdial database"
+  plan_required_service asterisk asterisk asterisk 5060 "Telephony engine (started by VICIdial keepalive after install)"
+  plan_required_service chronyd chrony chronyd 123 "Time sync"
+  echo
+}
+
 print_detect_summary() {
   header "Host inventory"
   cat <<EOF
@@ -781,6 +1055,7 @@ print_detect_summary() {
   ViciBox image   : $([[ $IS_VICIBOX -eq 1 ]] && echo yes || echo no)
   VICIdial files  : $([[ $VICIDIAL_PRESENT -eq 1 ]] && echo yes || echo no)
   PHP             : ${PHP_VERSION:-none}
+  Apache          : ${APACHE_VERSION:-none}  (${APACHE_PKG}, unit=${APACHE_UNIT}, ${APACHE_ACTIVE}, enabled=${APACHE_ENABLED}, :80=${APACHE_LISTEN80})
   Asterisk        : ${ASTERISK_VERSION:-none}
   MariaDB         : ${MARIADB_VERSION:-none}
   DB schema       : ${DB_SCHEMA:-none}
@@ -798,6 +1073,8 @@ write_detect_report() {
     echo "Host: $(host_name)  OS: ${OS_NAME}"
     echo
     echo "PASS=${PASS_COUNT} WARN=${WARN_COUNT} FAIL=${FAIL_COUNT} CONFLICTS=${CONFLICT_COUNT}"
+    echo "Apache: pkg=${APACHE_PKG} unit=${APACHE_UNIT} active=${APACHE_ACTIVE} enabled=${APACHE_ENABLED} :80=${APACHE_LISTEN80} version=${APACHE_VERSION:-none}"
+    echo "MariaDB: ${MARIADB_VERSION:-none}  Asterisk: ${ASTERISK_VERSION:-none}  PHP: ${PHP_VERSION:-none}"
   } > "$REPORT_FILE"
   info "Wrote detection report: ${REPORT_FILE}"
 }
@@ -823,12 +1100,14 @@ phase_detect() {
   detect_hardware
   maybe_enable_lab
   detect_php
+  detect_apache
   detect_asterisk
   detect_mariadb
   detect_security
   detect_services
   print_detect_summary
   print_service_table
+  print_required_services
   evaluate_requirements
   write_detect_report
   echo
@@ -900,6 +1179,66 @@ ensure_opensuse_repos() {
   zypper_n ref || warn "zypper ref had warnings"
 }
 
+ensure_apache() {
+  header "Apache HTTP server — check, install, enable, start"
+  if pkg_installed apache2 || have_cmd apache2ctl || have_cmd apachectl || have_cmd httpd; then
+    ok "Apache package already present"
+  else
+    info "Apache not installed — installing apache2 apache2-mod_php8 apache2-utils"
+    zypper_n in -y apache2 apache2-mod_php8 apache2-utils || \
+      zypper_try_in apache2 apache2-mod_php8 apache2-utils || \
+      die "Apache install failed. On Leap 16 try: zypper se apache2"
+  fi
+  if have_cmd a2enmod; then
+    run a2enmod php8 || run a2enmod php || true
+    run a2enmod rewrite || true
+  fi
+  mkdir -p "$WWW_ROOT"
+  local unit
+  unit="$(apache_unit_name)"
+  if ! ensure_unit "$unit" 25; then
+    fail "Could not start Apache (${unit})"
+    [[ "$FORCE" -eq 1 ]] || die "Apache did not start. Stop nginx/lighttpd with --stop-conflicts, then: systemctl status ${unit}"
+  fi
+  if unit_exists httpd && [[ "$unit" != "httpd" ]]; then
+    run systemctl enable httpd || true
+  fi
+  if wait_for_listen 80 15; then
+    ok "Apache is listening on TCP 80"
+  else
+    fail "Apache unit is up but TCP 80 is not listening"
+    ss -lntH 2>/dev/null | tee -a "$LOG_FILE" || true
+    [[ "$FORCE" -eq 1 ]] || die "Apache did not bind port 80. Resolve the port conflict, then re-run."
+  fi
+  if have_cmd apachectl; then
+    apachectl configtest 2>&1 | tee -a "$LOG_FILE" || true
+  elif have_cmd apache2ctl; then
+    apache2ctl configtest 2>&1 | tee -a "$LOG_FILE" || true
+  fi
+  detect_apache
+  ok "Apache ${APACHE_VERSION:-installed} (${unit} ${APACHE_ACTIVE}, enabled=${APACHE_ENABLED})"
+}
+
+ensure_mariadb_running() {
+  local unit
+  unit="$(db_unit_name)"
+  header "MariaDB — enable, start, ping"
+  if ! pkg_installed mariadb && ! have_cmd mysql && ! have_cmd mariadb; then
+    die "MariaDB is not installed"
+  fi
+  if ! ensure_unit "$unit" 40; then
+    fail "Could not start MariaDB (${unit})"
+    [[ "$FORCE" -eq 1 ]] || die "MariaDB did not start. Check: systemctl status ${unit}  and /etc/my.cnf.d/*.cnf"
+  fi
+  if wait_for_mariadb_ping 45; then
+    ok "MariaDB accepts connections (mysqladmin ping)"
+  else
+    fail "MariaDB is active but not accepting connections yet"
+    [[ "$FORCE" -eq 1 ]] || die "MariaDB ping failed. If you see 'option without preceding group', /etc/my.cnf.d/general.cnf needs a [mysqld] header."
+  fi
+  detect_mariadb
+}
+
 install_base_packages() {
   header "Phase 2 — Base OpenSUSE packages (box)"
   local critical=(
@@ -933,12 +1272,12 @@ install_base_packages() {
   zypper_try_in "${perlmods[@]}" || true
 
   if have_cmd systemctl; then
-    run systemctl enable --now chronyd || warn "Could not enable chronyd"
+    ensure_unit chronyd 15 || warn "Could not enable chronyd"
   fi
 }
 
 install_php() {
-  header "Phase 3 — PHP ${REQ_PHP_MIN} (web)"
+  header "Phase 3 — PHP ${REQ_PHP_MIN} + Apache (web)"
   local php_pkgs=(
     php8 php8-mysql php8-mysqli php8-gd php8-mbstring php8-xmlwriter
     php8-zip php8-curl php8-bcmath php8-opcache php8-gettext php8-iconv
@@ -982,15 +1321,11 @@ install_php() {
   fi
 
   if have_cmd a2enmod; then
-    run a2enmod php8 || true
+    run a2enmod php8 || run a2enmod php || true
     run a2enmod rewrite || true
   fi
   # OpenSUSE Apache default document root is /srv/www/htdocs
   mkdir -p "$WWW_ROOT"
-  if have_cmd systemctl; then
-    run systemctl enable apache2
-    run systemctl restart apache2
-  fi
 }
 
 configure_mariadb() {
@@ -1028,11 +1363,7 @@ CNF
     info "MariaDB innodb_buffer_pool_size=${innodb_pool} (RAM ${RAM_MB} MB)"
   fi
   write_timestamp_cnf
-  if have_cmd systemctl; then
-    run systemctl enable mariadb
-    run systemctl restart mariadb
-  fi
-  detect_mariadb
+  ensure_mariadb_running
   ok "MariaDB ${MARIADB_VERSION:-installed}; TIMESTAMP implicit ON UPDATE restored"
 
   if [[ "$LEGACY_PASSWORDS" -eq 1 ]]; then
@@ -1358,10 +1689,16 @@ configure_firewall() {
 
 configure_mariadb_timestamp_only() {
   write_timestamp_cnf
+  local unit
+  unit="$(db_unit_name)"
   if have_cmd systemctl; then
-    run systemctl restart mariadb || true
+    run systemctl restart "$unit" || run systemctl restart mariadb || true
   fi
-  ok "Applied MariaDB TIMESTAMP bugfix ([mysqld] explicit_defaults_for_timestamp=Off)"
+  if wait_for_mariadb_ping 30; then
+    ok "Applied MariaDB TIMESTAMP bugfix ([mysqld] explicit_defaults_for_timestamp=Off)"
+  else
+    warn "Wrote TIMESTAMP cnf but MariaDB ping failed after restart"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1486,15 +1823,32 @@ cmd_migrate() {
 
 cmd_verify_soft() {
   header "Post-install verification"
-  detect_php; detect_asterisk; detect_mariadb
+  detect_php; detect_apache; detect_asterisk; detect_mariadb
   [[ -n "$PHP_VERSION" ]] && ok "PHP $PHP_VERSION" || warn "PHP missing"
+  if [[ "$APACHE_ACTIVE" == "active" && "$APACHE_LISTEN80" == "yes" ]]; then
+    ok "Apache ${APACHE_VERSION:-ok} (${APACHE_UNIT} active, :80 listening)"
+  elif [[ "$APACHE_ACTIVE" == "active" ]]; then
+    warn "Apache ${APACHE_UNIT} is active but TCP 80 is not listening"
+  else
+    warn "Apache not running (unit=${APACHE_UNIT} state=${APACHE_ACTIVE})"
+  fi
   [[ -n "$ASTERISK_VERSION" ]] && ok "Asterisk $ASTERISK_VERSION" || warn "Asterisk missing"
-  [[ -n "$MARIADB_VERSION" ]] && ok "MariaDB $MARIADB_VERSION" || warn "MariaDB missing"
+  if [[ -n "$MARIADB_VERSION" ]] && wait_for_mariadb_ping 5; then
+    ok "MariaDB $MARIADB_VERSION (ping ok)"
+  elif [[ -n "$MARIADB_VERSION" ]]; then
+    warn "MariaDB $MARIADB_VERSION installed but ping failed"
+  else
+    warn "MariaDB missing"
+  fi
   if have_cmd screen; then
     screen -ls || info "No screen sessions yet (normal before first reboot / keepalive)"
   fi
   if have_cmd apachectl || have_cmd apache2ctl; then
     (apachectl configtest || apache2ctl configtest) 2>&1 | tee -a "$LOG_FILE" || true
+  fi
+  if have_cmd curl; then
+    info "HTTP HEAD http://127.0.0.1/"
+    curl -sI -m 5 http://127.0.0.1/ | head -n 5 | tee -a "$LOG_FILE" || warn "localhost:80 did not answer"
   fi
   if [[ -d "${WWW_ROOT}/vicidial" ]]; then
     ok "Web files in ${WWW_ROOT}/vicidial"
@@ -1539,6 +1893,7 @@ cmd_install() {
     express|all)
       install_base_packages
       install_php
+      ensure_apache
       configure_mariadb
       install_dahdi
       install_asterisk
@@ -1561,6 +1916,7 @@ cmd_install() {
     web)
       install_base_packages
       install_php
+      ensure_apache
       checkout_vicidial
       run_install_pl
       write_credentials
@@ -1579,7 +1935,7 @@ cmd_install() {
     archive)
       install_base_packages
       zypper_n in -y vsftpd || true
-      run systemctl enable --now vsftpd || true
+      ensure_unit vsftpd 15 || true
       ;;
   esac
   cmd_verify_soft
