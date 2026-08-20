@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # install-vicidial12-opensuse.sh
 #
-# Ultimate OpenSUSE installer for VICIdial 12 / ViciBox 12.0.2.
+# Ultimate OpenSUSE installer for VICIdial 12 (no ViciBox ISO).
 # Detects existing services first, checks the full stack against the
 # ViciBox 12 target (OpenSUSE Leap 15.6, PHP 8.2, MariaDB 10.11,
-# Asterisk 18), can consume a ViciBox ISO, installs from the OS box
-# through Asterisk, and migrates older VICIdial databases in schema order.
+# Asterisk 18), then builds from zypper packages + source. Designed
+# for Hetzner and other VPS/dedicated hosts where the 2GB ISO is too slow.
 #
-# Official stack (ViciBox 12.0.2):
+# Official stack (ViciBox 12.0.2 equivalent):
 #   OpenSUSE Leap 15.6 · Kernel 6.4 · PHP 8.2 · MariaDB 10.11.9 · Asterisk 18
 #   VICIdial 2.14 trunk · DB schema 1729+
 #
 # Usage:
 #   ./install-vicidial12-opensuse.sh detect
-#   ./install-vicidial12-opensuse.sh install --iso /path/ViciBox_V12.x86_64-12.0.2.iso
+#   ./install-vicidial12-opensuse.sh install --role express --yes --stop-conflicts
 #   ./install-vicidial12-opensuse.sh migrate --dump /path/asterisk.sql.gz
 #
 # Run as root on the target OpenSUSE server. Never use `zypper dup`.
@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.0.0"
+VERSION="1.1.0"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -113,7 +113,7 @@ fi
 log() {
   local msg="$*"
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-  printf '%s %s\n' "$(date '+%F %T')" "$msg" | tee -a "$LOG_FILE" >/dev/null
+  printf '%s %s\n' "$(date '+%F %T')" "$msg" | tee -a "$LOG_FILE" >/dev/null 2>/dev/null || true
   printf '%s\n' "$msg"
 }
 
@@ -156,9 +156,10 @@ usage() {
   cat <<EOF
 ${C_BOLD}VICIdial 12 Ultimate Installer for OpenSUSE${C_RST}  v${VERSION}
 
-Detects every relevant service and version first, then installs or
-migrates a ViciBox 12 stack: OpenSUSE Leap 15.6, PHP 8.2, MariaDB 10.11,
-Asterisk 18 (VICIdial patches), Apache, DAHDI, and VICIdial 2.14.
+Detects every relevant service and version first, then installs the
+ViciBox 12 stack from packages + source (no 2GB ISO): OpenSUSE Leap 15.6,
+PHP 8.2, MariaDB 10.11, Asterisk 18 (VICIdial patches), Apache, DAHDI,
+and VICIdial 2.14. Intended for Hetzner and other VPS/dedicated servers.
 
 ${C_BOLD}USAGE${C_RST}
   $SCRIPT_NAME <command> [options]
@@ -166,16 +167,11 @@ ${C_BOLD}USAGE${C_RST}
 ${C_BOLD}COMMANDS${C_RST}
   detect         Scan OS, hardware, services, PHP, Asterisk, and database
   check          Detect + print the requirements matrix (no changes)
-  install        Full install from OS box through Asterisk + VICIdial
+  install        Scratch install: box → PHP → MariaDB → DAHDI → Asterisk → VICIdial
   migrate        Backup and upgrade/import an existing VICIdial database
-  iso-verify     Mount a ViciBox 12 ISO and report contents / checksum
-  download-iso   Fetch the official ViciBox 12.0.2 ISO + MD5
-  write-usb      Write a verified ISO to a USB device (destructive)
   help           Show this help
 
 ${C_BOLD}OPTIONS${C_RST}
-  --iso PATH              ViciBox 12 ISO (standard or -md RAID image)
-  --device DEV            USB device for write-usb (example: /dev/sdb)
   --role ROLE             express | database | web | telephony | archive
   --dump FILE             SQL dump (.sql or .sql.gz) for migrate
   --from-host HOST        Remote MariaDB host to dump during migrate
@@ -189,7 +185,7 @@ ${C_BOLD}OPTIONS${C_RST}
   --dry-run               Print actions without changing the system
   --stop-conflicts        Stop/disable conflicting services (nginx, etc.)
   --keep-conflicts        Leave conflicting services running (not recommended)
-  --skip-asterisk-build   Do not compile Asterisk (use existing or ISO RPMs)
+  --skip-asterisk-build   Do not compile Asterisk (use existing 18.x)
   --skip-firewall         Do not touch firewalld / iptables
   --legacy-passwords      Use historic VICIdial defaults (cron/1234) — insecure
   --jobs N                Parallel compile jobs (default: nproc)
@@ -198,25 +194,18 @@ ${C_BOLD}OPTIONS${C_RST}
 ${C_BOLD}EXAMPLES${C_RST}
   # Always start here. Detection never installs anything.
   $SCRIPT_NAME detect
+  $SCRIPT_NAME check
 
-  # ViciBox 12 ISO already on disk: verify, then install Express (all roles)
-  $SCRIPT_NAME iso-verify --iso /root/${REQ_ISO_NAME}
-  $SCRIPT_NAME install --iso /root/${REQ_ISO_NAME} --role express --yes
-
-  # Fresh OpenSUSE Leap 15.6 scratch install (no ISO)
-  $SCRIPT_NAME install --role express --yes
+  # Hetzner / stock OpenSUSE Leap 15.6 (no ISO download)
+  $SCRIPT_NAME install --role express --yes --stop-conflicts
 
   # Import an old VICIdial dump and walk schema upgrades to 2.14 / ${REQ_DB_SCHEMA_TARGET}
   $SCRIPT_NAME migrate --dump /root/old-asterisk.sql.gz --yes
 
-  # Download official ISO, write USB, then boot that machine for Phase 1
-  $SCRIPT_NAME download-iso --iso /root/${REQ_ISO_NAME}
-  $SCRIPT_NAME write-usb --iso /root/${REQ_ISO_NAME} --device /dev/sdb
-
 ${C_BOLD}NOTES${C_RST}
+  * No ViciBox ISO is downloaded, mounted, or required.
+  * On Hetzner dedicated: use Rescue installimage to install OpenSUSE Leap 15.6, then this script.
   * Detection always runs before install or migrate.
-  * On a ViciBox 12 ISO-installed OS, install uses vicibox-express / vicibox-install.
-  * On stock OpenSUSE Leap 15.6, install builds the same stack from packages + source.
   * Use 'zypper up' only. Never 'zypper dup' on a ViciDial box.
   * After a new MariaDB 10.11 database, explicit_defaults_for_timestamp=Off is required.
   * Default web login after a fresh install is 6666 / 1234 — change it immediately.
@@ -375,14 +364,16 @@ parse_args() {
   shift
   case "$COMMAND" in
     -h|--help|help) COMMAND="help" ;;
+    iso-verify|download-iso|write-usb)
+      die "ISO install is disabled. This script never downloads the 2GB ViciBox ISO. On Hetzner install OpenSUSE Leap 15.6 with installimage, then run: $SCRIPT_NAME install --role express --yes --stop-conflicts"
+      ;;
   esac
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --iso) ISO_PATH="${2:-}"; shift 2 ;;
-      --iso=*) ISO_PATH="${1#*=}"; shift ;;
-      --device) ISO_DEVICE="${2:-}"; shift 2 ;;
-      --device=*) ISO_DEVICE="${1#*=}"; shift ;;
+      --iso|--iso=*|--device|--device=*)
+        die "ISO options are disabled (Hetzner-friendly scratch install). Do not pass --iso. Run: $SCRIPT_NAME install --role express --yes --stop-conflicts"
+        ;;
       --role) ROLE="${2:-}"; shift 2 ;;
       --role=*) ROLE="${1#*=}"; shift ;;
       --dump) DUMP_PATH="${2:-}"; shift 2 ;;
@@ -706,11 +697,7 @@ evaluate_requirements() {
   fi
   add_req "$sec_ok" "MAC / LSM" "SELinux=${SELINUX} AppArmor=${APPARMOR}" "SELinux off; AppArmor permissive" "VICIdial assumes SELinux is disabled"
 
-  if [[ "$IS_VICIBOX" -eq 1 ]]; then
-    add_req "PASS" "ViciBox tools" "vicibox-express/install present" "ViciBox ${REQ_VICIBOX}" "Phase 2 ISO path available"
-  else
-    add_req "WARN" "ViciBox tools" "not a ViciBox image" "optional; scratch install OK" "ISO can still be used as a package source"
-  fi
+  add_req "PASS" "Install method" "scratch (packages + source)" "no ViciBox ISO" "Hetzner/VPS path: Leap 15.6 then this script"
 }
 
 print_service_table() {
@@ -787,128 +774,6 @@ phase_detect() {
   write_detect_report
   echo
   info "Summary: ${PASS_COUNT} pass, ${WARN_COUNT} warn, ${FAIL_COUNT} fail, ${CONFLICT_COUNT} conflicts"
-}
-
-# ---------------------------------------------------------------------------
-# ISO handling
-# ---------------------------------------------------------------------------
-
-iso_umount() {
-  if [[ "$ISO_MOUNTED" -eq 1 ]]; then
-    umount "$ISO_MOUNT" 2>/dev/null || true
-    ISO_MOUNTED=0
-  fi
-}
-
-iso_mount() {
-  local iso="${1:-$ISO_PATH}"
-  [[ -n "$iso" ]] || die "--iso PATH is required"
-  [[ -f "$iso" ]] || die "ISO not found: $iso"
-  mkdir -p "$ISO_MOUNT"
-  if mountpoint -q "$ISO_MOUNT"; then
-    warn "${ISO_MOUNT} already mounted"
-  else
-    run mount -o loop,ro "$iso" "$ISO_MOUNT"
-    ISO_MOUNTED=1
-    trap iso_umount EXIT
-  fi
-}
-
-iso_fingerprint() {
-  local iso="${1:-$ISO_PATH}"
-  info "ISO file: $iso"
-  info "Size: $(du -h "$iso" | awk '{print $1}')"
-  if have_cmd md5sum; then
-    info "MD5: $(md5sum "$iso" | awk '{print $1}')"
-  fi
-  local base
-  base="$(basename "$iso")"
-  case "$base" in
-    *12.0.2*) ok "Filename matches ViciBox ${REQ_VICIBOX}" ;;
-    *V12*|*v12*) warn "ViciBox 12 ISO, but not ${REQ_VICIBOX} specifically" ;;
-    *) warn "Filename does not look like ViciBox 12: $base" ;;
-  esac
-}
-
-iso_inspect() {
-  header "ISO contents"
-  iso_mount
-  ls -la "$ISO_MOUNT" | tee -a "$LOG_FILE"
-  echo
-  if [[ -f "${ISO_MOUNT}/content" ]]; then
-    info "content file:"
-    head -n 40 "${ISO_MOUNT}/content" || true
-  fi
-  if [[ -f "${ISO_MOUNT}/.discinfo" ]]; then
-    cat "${ISO_MOUNT}/.discinfo"
-  fi
-  local repo
-  repo="$(find "$ISO_MOUNT" -maxdepth 3 -type d -name repodata 2>/dev/null | head -n1 || true)"
-  if [[ -n "$repo" ]]; then
-    ok "Found RPM repo metadata: $repo"
-    ISO_REPO_DIR="$(dirname "$repo")"
-  else
-    warn "No RPM repodata on this ISO (typical for a bootable ViciBox installer image)"
-    ISO_REPO_DIR=""
-  fi
-  if find "$ISO_MOUNT" -iname '*vicibox*' -o -iname '*asterisk*' 2>/dev/null | head -n 20 | tee -a "$LOG_FILE" | grep -q .; then
-    info "ViciBox/Asterisk artifacts listed above"
-  fi
-}
-
-add_iso_zypper_repo() {
-  [[ -n "${ISO_REPO_DIR:-}" ]] || return 0
-  if have_cmd zypper; then
-    if zypper lr | grep -q vicibox-iso; then
-      run zypper rr vicibox-iso || true
-    fi
-    run zypper addrepo --refresh "dir:${ISO_REPO_DIR}" vicibox-iso
-    run zypper --gpg-auto-import-keys ref vicibox-iso || warn "Could not refresh ISO repo"
-  fi
-}
-
-download_iso() {
-  need_root
-  local dest="${ISO_PATH:-/root/${REQ_ISO_NAME}}"
-  mkdir -p "$(dirname "$dest")"
-  header "Download official ViciBox ${REQ_VICIBOX} ISO"
-  info "URL: ${REQ_ISO_BASE_URL}/${REQ_ISO_NAME}"
-  run wget -O "$dest" "${REQ_ISO_BASE_URL}/${REQ_ISO_NAME}"
-  run wget -O "${dest}.md5" "${REQ_ISO_BASE_URL}/${REQ_ISO_NAME%.iso}.md5" || \
-    run wget -O "${dest}.md5" "${REQ_ISO_BASE_URL}/${REQ_ISO_NAME}.md5" || \
-    warn "MD5 sidecar not downloaded"
-  if [[ -f "${dest}.md5" ]] && have_cmd md5sum; then
-    local expected actual
-    expected="$(awk '{print $1}' "${dest}.md5" | head -n1)"
-    actual="$(md5sum "$dest" | awk '{print $1}')"
-    if [[ -n "$expected" && "$expected" == "$actual" ]]; then
-      ok "MD5 matches: $actual"
-    else
-      fail "MD5 mismatch expected=$expected actual=$actual"
-      [[ "$FORCE" -eq 1 ]] || die "ISO checksum failed"
-    fi
-  fi
-  ISO_PATH="$dest"
-  iso_fingerprint "$dest"
-}
-
-write_usb() {
-  need_root
-  [[ -n "$ISO_PATH" ]] || die "--iso is required"
-  [[ -n "$ISO_DEVICE" ]] || die "--device is required (example: /dev/sdb)"
-  [[ -f "$ISO_PATH" ]] || die "ISO not found: $ISO_PATH"
-  [[ -b "$ISO_DEVICE" ]] || die "Not a block device: $ISO_DEVICE"
-  if [[ "$ISO_DEVICE" =~ [0-9]$ ]]; then
-    die "Pass the disk (e.g. /dev/sdb), not a partition (${ISO_DEVICE})"
-  fi
-  header "Write ISO to ${ISO_DEVICE} (DESTROYS all data on that device)"
-  lsblk "$ISO_DEVICE"
-  confirm "Erase ${ISO_DEVICE} and write $(basename "$ISO_PATH")?" || die "Aborted"
-  run umount "${ISO_DEVICE}"* 2>/dev/null || true
-  run dd if="$ISO_PATH" of="$ISO_DEVICE" bs=4M status=progress conv=fsync
-  run sync
-  ok "USB written. Boot the target server from this media for ViciBox Phase 1."
-  info "After Phase 1 (OS on disk), copy this script to the server and run: $SCRIPT_NAME install"
 }
 
 # ---------------------------------------------------------------------------
@@ -1367,32 +1232,6 @@ configure_firewall() {
   fi
 }
 
-vicibox_phase2() {
-  header "ViciBox Phase 2 (ISO-installed OS)"
-  info "This host already has ViciBox tools. Running the official Phase 2 installer."
-  configure_mariadb_timestamp_only
-  case "$ROLE" in
-    express|all)
-      if have_cmd vicibox-express; then
-        if [[ "$YES" -eq 1 ]]; then
-          run bash -lc 'printf "Y\n" | vicibox-express'
-        else
-          run vicibox-express
-        fi
-      else
-        die "vicibox-express not found"
-      fi
-      ;;
-    *)
-      if have_cmd vicibox-install; then
-        run vicibox-install
-      else
-        die "vicibox-install not found for role ${ROLE}"
-      fi
-      ;;
-  esac
-}
-
 configure_mariadb_timestamp_only() {
   mkdir -p /etc/my.cnf.d
   if [[ "$DRY_RUN" -eq 0 ]]; then
@@ -1568,22 +1407,14 @@ cmd_install() {
   need_root
   phase_detect
   if [[ -n "$ISO_PATH" ]]; then
-    iso_fingerprint
-    iso_inspect
-    add_iso_zypper_repo
+    die "ISO install is disabled. Use scratch install: $SCRIPT_NAME install --role express --yes --stop-conflicts"
   fi
   assert_can_install
   resolve_conflicts
-  confirm "Install VICIdial 12 (${ROLE}) on $(hostname)?" || die "Aborted"
-
   if [[ "$IS_VICIBOX" -eq 1 ]]; then
-    vicibox_phase2
-    configure_mariadb_timestamp_only
-    write_credentials
-    cmd_verify_soft
-    info "Reboot, then run: screen -ls   and   asterisk -r"
-    return
+    warn "ViciBox tools are present, but ISO/vicibox-express is skipped. Installing from packages + source."
   fi
+  confirm "Install VICIdial 12 scratch stack (${ROLE}) on $(hostname)? (no ISO)" || die "Aborted"
 
   ensure_opensuse_repos
   case "$ROLE" in
@@ -1661,13 +1492,6 @@ cmd_check() {
   ok "Host meets or can be upgraded to the ViciBox 12 profile (${WARN_COUNT} warnings)"
 }
 
-cmd_iso_verify() {
-  need_root
-  [[ -n "$ISO_PATH" ]] || die "--iso PATH is required"
-  iso_fingerprint
-  iso_inspect
-}
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1693,9 +1517,9 @@ main() {
     check) cmd_check ;;
     install) cmd_install ;;
     migrate) cmd_migrate ;;
-    iso-verify) cmd_iso_verify ;;
-    download-iso) download_iso ;;
-    write-usb) write_usb ;;
+    iso-verify|download-iso|write-usb)
+      die "ISO install is disabled. On Hetzner: install OpenSUSE Leap 15.6, then $SCRIPT_NAME install --role express --yes --stop-conflicts"
+      ;;
     *) die "Unknown command: $COMMAND (try: $SCRIPT_NAME help)" ;;
   esac
 }
