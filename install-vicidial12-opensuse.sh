@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.2.0"
+VERSION="1.2.1"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -319,6 +319,14 @@ listening_on() {
   fi
 }
 
+mysql_cli() {
+  if have_cmd mariadb; then
+    printf '%s' mariadb
+  else
+    printf '%s' mysql
+  fi
+}
+
 mysql_exec() {
   local extra=()
   if [[ -n "${DB_ROOT_PASS}" ]]; then
@@ -326,7 +334,7 @@ mysql_exec() {
   elif [[ -f /root/.my.cnf ]]; then
     :
   fi
-  mysql -N -B -u root "${extra[@]}" "$@"
+  "$(mysql_cli)" -N -B -u root "${extra[@]}" "$@"
 }
 
 mysql_file() {
@@ -334,7 +342,17 @@ mysql_file() {
   if [[ -n "${DB_ROOT_PASS}" ]]; then
     extra+=(-p"${DB_ROOT_PASS}")
   fi
-  mysql -u root "${extra[@]}" "$@"
+  "$(mysql_cli)" -u root "${extra[@]}" "$@"
+}
+
+write_timestamp_cnf() {
+  mkdir -p /etc/my.cnf.d
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  # Leap 16 / MariaDB 11 requires a [mysqld] group.
+  cat > /etc/my.cnf.d/general.cnf <<'CNF'
+[mysqld]
+explicit_defaults_for_timestamp = Off
+CNF
 }
 
 host_name() {
@@ -860,13 +878,13 @@ resolve_conflicts() {
 # ---------------------------------------------------------------------------
 
 zypper_n() {
-  run zypper --non-interactive --gpg-auto-import-keys "$@"
+  run zypper --non-interactive --no-confirm --gpg-auto-import-keys "$@"
 }
 
 zypper_try_in() {
   local p rc=0
   for p in "$@"; do
-    if zypper --non-interactive --gpg-auto-import-keys in -y "$p" >/dev/null 2>&1; then
+    if zypper --non-interactive --no-confirm --gpg-auto-import-keys in -y "$p" >/dev/null 2>&1; then
       info "Installed $p"
     else
       warn "Package not available (Leap ${OS_VERSION}): $p"
@@ -1009,13 +1027,7 @@ collation-server = utf8_unicode_ci
 CNF
     info "MariaDB innodb_buffer_pool_size=${innodb_pool} (RAM ${RAM_MB} MB)"
   fi
-  # Official ViciBox 12.0.1/12.0.2 bugfix location as well.
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    touch /etc/my.cnf.d/general.cnf
-    if ! grep -q 'explicit_defaults_for_timestamp' /etc/my.cnf.d/general.cnf; then
-      echo "explicit_defaults_for_timestamp = Off" >> /etc/my.cnf.d/general.cnf
-    fi
-  fi
+  write_timestamp_cnf
   if have_cmd systemctl; then
     run systemctl enable mariadb
     run systemctl restart mariadb
@@ -1080,14 +1092,44 @@ EOF
   ok "Credentials written to ${CRED_FILE}"
 }
 
+ensure_kernel_build_dir() {
+  local kver="${1:-$(uname -r)}"
+  local build="/lib/modules/${kver}/build"
+  if [[ -f "${build}/Makefile" ]]; then
+    ok "Kernel headers present for ${kver}"
+    return 0
+  fi
+  info "Installing kernel headers for ${kver}"
+  zypper_try_in kernel-default-devel kernel-devel kernel-source kernel-syms || true
+  local ver="${kver%-default}"
+  zypper --non-interactive --no-confirm --gpg-auto-import-keys in -y "kernel-default-devel-${ver}" >/dev/null 2>&1 || true
+  if [[ -f "${build}/Makefile" ]]; then
+    ok "Kernel headers installed for ${kver}"
+    return 0
+  fi
+  local obj=""
+  obj="$(ls -d /usr/src/linux-*-obj/*/default /usr/src/linux-obj/*/default 2>/dev/null | head -n1 || true)"
+  mkdir -p "/lib/modules/${kver}"
+  if [[ -n "$obj" ]]; then
+    ln -sfn "$obj" "$build"
+  elif [[ -d /usr/src/linux ]]; then
+    ln -sfn /usr/src/linux "$build"
+  fi
+  if [[ -f "${build}/Makefile" ]]; then
+    ok "Linked kernel build dir ${build}"
+    return 0
+  fi
+  warn "No matching kernel headers for ${kver} (DAHDI skip is OK on a Cloud VM)."
+  return 1
+}
+
 install_dahdi() {
   header "Phase 5 — DAHDI timing (Asterisk MeetMe)"
-  # Prefer OBS packages; fall back to source.
   if zypper se -s dahdi-linux >/dev/null 2>&1; then
-  local leap_repo="15.6"
-  [[ "${OS_VERSION}" == 16* ]] && leap_repo="16.0"
-  zypper_n ar -f "https://download.opensuse.org/repositories/home:vicidial/${leap_repo}/home:vicidial.repo" home-vicidial 2>/dev/null || \
-    zypper_n ar -f https://download.opensuse.org/repositories/home:vicidial/15.6/home:vicidial.repo home-vicidial 2>/dev/null || true
+    local leap_repo="15.6"
+    [[ "${OS_VERSION}" == 16* ]] && leap_repo="16.0"
+    zypper_n ar -f "https://download.opensuse.org/repositories/home:vicidial/${leap_repo}/home:vicidial.repo" home-vicidial 2>/dev/null || \
+      zypper_n ar -f https://download.opensuse.org/repositories/home:vicidial/15.6/home:vicidial.repo home-vicidial 2>/dev/null || true
     zypper_n ref home-vicidial || true
     zypper_n in -y dahdi-linux dahdi-tools || warn "OBS DAHDI packages not available"
   fi
@@ -1098,21 +1140,30 @@ install_dahdi() {
     ok "DAHDI present"
     return
   fi
+  if ! ensure_kernel_build_dir "$(uname -r)"; then
+    warn "Skipping DAHDI source build. Asterisk 18 will use timerfd (ConfBridge) on this lab VM."
+    return 0
+  fi
   info "Building DAHDI from source"
   mkdir -p "$SRC_DIR"
+  local d=""
   (
     cd "$SRC_DIR"
-    run wget -O dahdi-linux-complete-current.tar.gz "$DAHDI_SRC_URL"
-    run tar xf dahdi-linux-complete-current.tar.gz
-    local d
-    d="$(find "$SRC_DIR" -maxdepth 1 -type d -name 'dahdi-linux-complete-*' | sort | tail -n1)"
-    [[ -n "$d" ]] || die "DAHDI source tree not found"
-    cd "$d"
-    run make all
-    run make install
-    run make config || true
+    wget -O dahdi-linux-complete-current.tar.gz "$DAHDI_SRC_URL"
+    tar xf dahdi-linux-complete-current.tar.gz
   )
-  run modprobe dahdi || warn "DAHDI kernel module failed to load"
+  d="$(find "$SRC_DIR" -maxdepth 1 -type d -name 'dahdi-linux-complete-*' | sort | tail -n1)"
+  if [[ -z "$d" ]]; then
+    warn "DAHDI source tree not found; continuing without DAHDI"
+    return 0
+  fi
+  if ! make -C "$d" all; then
+    warn "DAHDI kernel compile failed for $(uname -r). Lab VMs can run without DAHDI (timerfd)."
+    return 0
+  fi
+  make -C "$d" install || warn "DAHDI make install failed"
+  make -C "$d" config || true
+  modprobe dahdi || warn "dahdi module not loaded (OK on VMs without telephony cards)"
 }
 
 install_libpri() {
@@ -1169,7 +1220,7 @@ install_asterisk() {
     run make menuselect.makeopts
     local enable
     for enable in app_meetme app_confbridge res_http_websocket res_srtp res_timing_dahdi \
-                  codec_opus chan_sip; do
+                  res_timing_timerfd res_timing_pthread codec_opus chan_sip; do
       menuselect/menuselect --enable "$enable" menuselect.makeopts || warn "menuselect enable $enable failed"
     done
     run make -j "${COMPILE_JOBS}" all
@@ -1306,17 +1357,11 @@ configure_firewall() {
 }
 
 configure_mariadb_timestamp_only() {
-  mkdir -p /etc/my.cnf.d
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    touch /etc/my.cnf.d/general.cnf
-    if ! grep -q 'explicit_defaults_for_timestamp' /etc/my.cnf.d/general.cnf; then
-      echo "explicit_defaults_for_timestamp = Off" >> /etc/my.cnf.d/general.cnf
-      if have_cmd systemctl; then
-        run systemctl restart mariadb || true
-      fi
-      ok "Applied ViciBox 12.0.1 MariaDB TIMESTAMP bugfix"
-    fi
+  write_timestamp_cnf
+  if have_cmd systemctl; then
+    run systemctl restart mariadb || true
   fi
+  ok "Applied MariaDB TIMESTAMP bugfix ([mysqld] explicit_defaults_for_timestamp=Off)"
 }
 
 # ---------------------------------------------------------------------------
