@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.3.0"
+VERSION="1.3.1"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -310,16 +310,35 @@ pkg_installed() {
 
 listening_on() {
   local port="$1" proto="${2:-tcp}"
+  # ss column layout varies: with -tu the local address is not always $4.
+  # Match a field that ends in :PORT so *:80, 0.0.0.0:80, and [::]:80 all count.
+  # Do not use ":80" as a substring — that false-matches :8080.
   if have_cmd ss; then
+    if [[ "$proto" == "tcp" ]]; then
+      ss -H -l -n -t "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+    elif [[ "$proto" == "udp" ]]; then
+      ss -H -l -n -u "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+    else
+      ss -H -l -n -t "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+      ss -H -l -n -u "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+    fi
     ss -lntuH 2>/dev/null | awk -v port="$port" -v proto="$proto" '
       {
-        if (proto != "any" && tolower($1) !~ proto) next
-        n = split($4, addr, ":")
-        if (n && addr[n] == port) found=1
+        if (proto == "tcp" && $1 ~ /^udp/) next
+        if (proto == "udp" && $1 ~ /^tcp/) next
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ (":" port "$")) found = 1
+        }
       }
       END { exit found ? 0 : 1 }'
   elif have_cmd netstat; then
-    netstat -lntu 2>/dev/null | awk -v port=":${port}$" '$0 ~ port { found=1 } END { exit found ? 0 : 1 }'
+    netstat -lntu 2>/dev/null | awk -v port="$port" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ (":" port "$")) found = 1
+        }
+      }
+      END { exit found ? 0 : 1 }'
   else
     return 1
   fi
@@ -738,6 +757,14 @@ detect_services() {
       case "$level" in
         conflict-web|conflict-db|conflict-tel)
           if [[ "$active" == "active" || "$listening" == "yes" ]]; then
+            # Leap 16: mysql.service is often an alias of mariadb — do not treat it as Oracle MySQL.
+            if [[ "$name" == mysql || "$name" == mysqld ]]; then
+              local real_id=""
+              real_id="$(systemctl show -p Id --value "${name}.service" 2>/dev/null || true)"
+              if [[ "$real_id" == "mariadb.service" ]]; then
+                continue
+              fi
+            fi
             CONFLICT_ROWS+=("$name|$level|$notes")
             CONFLICT_COUNT=$((CONFLICT_COUNT + 1))
           fi
@@ -1037,7 +1064,7 @@ print_required_services() {
   plan_required_service apache2 apache2 apache2 80 "VICIdial web UI (Apache + mod_php)"
   plan_required_service mariadb mariadb mariadb 3306 "VICIdial database"
   plan_required_service asterisk asterisk asterisk 5060 "Telephony engine (started by VICIdial keepalive after install)"
-  plan_required_service chronyd chrony chronyd 123 "Time sync"
+  plan_required_service chronyd chrony chronyd "" "Time sync (client; may not listen on UDP 123)"
   echo
 }
 
@@ -1157,13 +1184,18 @@ resolve_conflicts() {
 # ---------------------------------------------------------------------------
 
 zypper_n() {
-  run zypper --non-interactive --no-confirm --gpg-auto-import-keys "$@"
+  # Leap 16 zypper does not accept global --no-confirm. Use --non-interactive
+  # and pass -y on install/remove subcommands.
+  run zypper --non-interactive --gpg-auto-import-keys "$@"
 }
 
 zypper_try_in() {
   local p rc=0
   for p in "$@"; do
-    if zypper --non-interactive --no-confirm --gpg-auto-import-keys in -y "$p" >/dev/null 2>&1; then
+    if pkg_installed "$p"; then
+      continue
+    fi
+    if zypper --non-interactive --gpg-auto-import-keys in -y "$p" >/dev/null 2>&1; then
       info "Installed $p"
     else
       warn "Package not available (Leap ${OS_VERSION}): $p"
@@ -1200,11 +1232,11 @@ ensure_apache() {
     fail "Could not start Apache (${unit})"
     [[ "$FORCE" -eq 1 ]] || die "Apache did not start. Stop nginx/lighttpd with --stop-conflicts, then: systemctl status ${unit}"
   fi
-  if unit_exists httpd && [[ "$unit" != "httpd" ]]; then
-    run systemctl enable httpd || true
-  fi
+  # httpd.service is a Leap 16 alias of apache2 — do not systemctl enable the link.
   if wait_for_listen 80 15; then
     ok "Apache is listening on TCP 80"
+  elif have_cmd curl && curl -sI -m 5 http://127.0.0.1/ >/dev/null 2>&1; then
+    ok "Apache answers on http://127.0.0.1/"
   else
     fail "Apache unit is up but TCP 80 is not listening"
     ss -lntH 2>/dev/null | tee -a "$LOG_FILE" || true
@@ -1433,7 +1465,7 @@ ensure_kernel_build_dir() {
   info "Installing kernel headers for ${kver}"
   zypper_try_in kernel-default-devel kernel-devel kernel-source kernel-syms || true
   local ver="${kver%-default}"
-  zypper --non-interactive --no-confirm --gpg-auto-import-keys in -y "kernel-default-devel-${ver}" >/dev/null 2>&1 || true
+  zypper --non-interactive --gpg-auto-import-keys in -y "kernel-default-devel-${ver}" >/dev/null 2>&1 || true
   if [[ -f "${build}/Makefile" ]]; then
     ok "Kernel headers installed for ${kver}"
     return 0
