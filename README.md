@@ -1,5 +1,7 @@
 # VICIdial 12 installer for OpenSUSE (no ISO)
 
+[![CI](https://github.com/imranniazD360/VICI/actions/workflows/ci.yml/badge.svg)](https://github.com/imranniazD360/VICI/actions)
+
 Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **not** download, mount, or boot the 2GB ViciBox ISO — that transfer is too slow on Hetzner and similar hosts.
 
 **Full step-by-step guide (all phases, credentials, softphone, troubleshooting):**  
