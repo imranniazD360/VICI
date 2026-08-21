@@ -13,6 +13,7 @@
 #
 # Usage:
 #   ./install-vicidial12-opensuse.sh detect
+#   ./install-vicidial12-opensuse.sh setup --yes
 #   ./install-vicidial12-opensuse.sh install --role express --yes --stop-conflicts
 #   ./install-vicidial12-opensuse.sh migrate --dump /path/asterisk.sql.gz
 #
@@ -22,7 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-VERSION="1.3.1"
+VERSION="1.4.1"
 STARTED_AT="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-/var/log/vicidial-installer}"
 LOG_FILE="${LOG_DIR}/install-${STARTED_AT}.log"
@@ -60,9 +61,10 @@ REQ_ISO_NAME="${REQ_ISO_NAME:-ViciBox_V12.x86_64-12.0.2.iso}"
 REQ_ISO_MD_NAME="${REQ_ISO_MD_NAME:-ViciBox_V12.x86_64-12.0.2-md.iso}"
 REQ_ISO_BASE_URL="${REQ_ISO_BASE_URL:-https://download.vicidial.com/iso/vicibox/server}"
 PATCH_BASE_URL="${PATCH_BASE_URL:-https://download.vicidial.com/asterisk-patches/Asterisk-18}"
-ASTERISK_SRC_URL="${ASTERISK_SRC_URL:-https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-18-current.tar.gz}"
+# Asterisk 18 is EOL — asterisk-18-current.tar.gz 404s; use last 18.x in old-releases.
+ASTERISK_SRC_URL="${ASTERISK_SRC_URL:-https://downloads.asterisk.org/pub/telephony/asterisk/old-releases/asterisk-18.26.4.tar.gz}"
 DAHDI_SRC_URL="${DAHDI_SRC_URL:-https://downloads.asterisk.org/pub/telephony/dahdi-linux-complete/dahdi-linux-complete-current.tar.gz}"
-LIBPRI_SRC_URL="${LIBPRI_SRC_URL:-https://downloads.asterisk.org/pub/telephony/libpri/libpri-current.tar.gz}"
+LIBPRI_SRC_URL="${LIBPRI_SRC_URL:-https://downloads.asterisk.org/pub/telephony/libpri/libpri-1-current.tar.gz}"
 
 COMMAND=""
 ISO_PATH=""
@@ -168,6 +170,7 @@ ${C_BOLD}USAGE${C_RST}
 ${C_BOLD}COMMANDS${C_RST}
   detect         Scan OS, hardware, services, PHP, Asterisk, and database
   check          Detect + print the requirements matrix (no changes)
+  setup          Enable/start required services (Apache, MariaDB, Asterisk, portal IP sync)
   install        Scratch install: box → Apache/PHP → MariaDB → DAHDI → Asterisk → VICIdial
   migrate        Backup and upgrade/import an existing VICIdial database
   help           Show this help
@@ -198,6 +201,9 @@ ${C_BOLD}EXAMPLES${C_RST}
   $SCRIPT_NAME detect
   $SCRIPT_NAME check
 
+  # After Asterisk is built (or on a re-run): create unit, enable chan_sip, start telephony
+  $SCRIPT_NAME setup --yes
+
   # Hetzner / stock OpenSUSE Leap 15.6 or 16.0 (no ISO download)
   $SCRIPT_NAME install --role express --yes --stop-conflicts
 
@@ -211,11 +217,15 @@ ${C_BOLD}NOTES${C_RST}
   * No ViciBox ISO is downloaded, mounted, or required.
   * Leap 15.6 or 16.0. A 2-core / 4 GB box is a lab profile (one test call), not production.
   * Detection always runs before install or migrate.
-  * Required services (Apache, MariaDB, chronyd) are checked first: if missing
+  * Required services (Apache, MariaDB, Asterisk, chronyd) are checked first: if missing
     they are installed, enabled, started, and verified (same pattern as the DB).
+  * Use 'setup' to enable/start Asterisk (systemd unit + chan_sip) without rebuilding.
   * Use 'zypper up' only. Never 'zypper dup' on a ViciDial box.
-  * After a new MariaDB 10.11 database, explicit_defaults_for_timestamp=Off is required.
+  * After a new MariaDB 10.11+ database: explicit_defaults_for_timestamp=Off and
+    sql_mode=NO_ENGINE_SUBSTITUTION (avoids blank admin pages on agent/phone save).
   * Default web login after a fresh install is 6666 / 1234 — change it immediately.
+  * Demo agent login: 8001 / 8001 with phone 8001 / 8001 (also 6001, 7001); campaign DEMOCAMP.
+  * Demo USA leads: list 1001 on DEMOCAMP (phone_code=1, country USA, 555-01xx fiction numbers).
 
 EOF
 }
@@ -313,24 +323,28 @@ listening_on() {
   # ss column layout varies: with -tu the local address is not always $4.
   # Match a field that ends in :PORT so *:80, 0.0.0.0:80, and [::]:80 all count.
   # Do not use ":80" as a substring — that false-matches :8080.
+  # Prefer plain ss -lntH parsing first: some Leap 16 ss builds accept
+  # "sport = :80" but still return empty while *:80 is listening.
   if have_cmd ss; then
-    if [[ "$proto" == "tcp" ]]; then
-      ss -H -l -n -t "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
-    elif [[ "$proto" == "udp" ]]; then
-      ss -H -l -n -u "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
-    else
-      ss -H -l -n -t "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
-      ss -H -l -n -u "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
-    fi
-    ss -lntuH 2>/dev/null | awk -v port="$port" -v proto="$proto" '
+    if ss -lntuH 2>/dev/null | awk -v port="$port" -v proto="$proto" '
       {
-        if (proto == "tcp" && $1 ~ /^udp/) next
-        if (proto == "udp" && $1 ~ /^tcp/) next
+        if (proto == "tcp" && $1 !~ /^tcp/) next
+        if (proto == "udp" && $1 !~ /^udp/) next
         for (i = 1; i <= NF; i++) {
-          if ($i ~ (":" port "$")) found = 1
+          if ($i ~ (":" port "$")) { found = 1; exit }
         }
       }
       END { exit found ? 0 : 1 }'
+    then
+      return 0
+    fi
+    if [[ "$proto" == "tcp" || "$proto" == "any" ]]; then
+      ss -H -l -n -t "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+    fi
+    if [[ "$proto" == "udp" || "$proto" == "any" ]]; then
+      ss -H -l -n -u "sport = :${port}" 2>/dev/null | grep -q LISTEN && return 0
+    fi
+    return 1
   elif have_cmd netstat; then
     netstat -lntu 2>/dev/null | awk -v port="$port" '
       {
@@ -454,11 +468,30 @@ mysql_exec() {
 }
 
 mysql_file() {
+  # Prefer /root/.my.cnf when DB_ROOT_PASS is unset. Never invent a -p that
+  # overrides a working .my.cnf — that silently kills re-runs after Phase 4.
   local extra=()
   if [[ -n "${DB_ROOT_PASS}" ]]; then
     extra+=(-p"${DB_ROOT_PASS}")
   fi
   "$(mysql_cli)" -u root "${extra[@]}" "$@"
+}
+
+load_root_my_cnf_pass() {
+  # Populate DB_ROOT_PASS from an existing installer .my.cnf (mode 0600).
+  [[ -n "${DB_ROOT_PASS}" ]] && return 0
+  [[ -f /root/.my.cnf ]] || return 1
+  local p=""
+  p="$(awk -F= '/^[[:space:]]*password=/{sub(/^[[:space:]]*password=/,""); print; exit}' /root/.my.cnf 2>/dev/null || true)"
+  [[ -n "$p" ]] || return 1
+  DB_ROOT_PASS="$p"
+  return 0
+}
+
+trap_err() {
+  local ec=$? line="${1:-?}" cmd="${2:-}"
+  log "${C_RED}[FATAL]${C_RST} Command failed (exit ${ec}) at line ${line}: ${cmd}"
+  exit "$ec"
 }
 
 write_timestamp_cnf() {
@@ -468,6 +501,7 @@ write_timestamp_cnf() {
   cat > /etc/my.cnf.d/general.cnf <<'CNF'
 [mysqld]
 explicit_defaults_for_timestamp = Off
+sql_mode = NO_ENGINE_SUBSTITUTION
 CNF
 }
 
@@ -574,7 +608,7 @@ PHP_VERSION=""; PHP_SAPI=""
 ASTERISK_VERSION=""; MARIADB_VERSION=""
 APACHE_PKG="not installed"; APACHE_UNIT="apache2"; APACHE_VERSION=""
 APACHE_ACTIVE="unknown"; APACHE_ENABLED="unknown"
-APACHE_LISTEN80="no"; APACHE_LISTEN443="no"
+APACHE_LISTEN80="no"; APACHE_LISTEN443="no"  # 443 tracked only; installer never enables HTTPS/SSL
 VICIBOX_PRESENT=0; VICIDIAL_PRESENT=0
 DB_SCHEMA=""; DB_CODE_VERSION=""
 APPARMOR="unknown"; SELINUX="unknown"
@@ -701,10 +735,10 @@ detect_security() {
 
 # name|package_hint|ports|conflict_level|notes
 SERVICE_CATALOG=(
-  "apache2|apache2|80,443|required-web|VICIdial web UI"
-  "httpd|apache2|80,443|required-web|Apache alias"
-  "nginx|nginx|80,443|conflict-web|Conflicts with Apache on :80/:443"
-  "lighttpd|lighttpd|80,443|conflict-web|Conflicts with Apache"
+  "apache2|apache2|80|required-web|VICIdial web UI (HTTP only — no SSL)"
+  "httpd|apache2|80|required-web|Apache alias"
+  "nginx|nginx|80|conflict-web|Conflicts with Apache on :80"
+  "lighttpd|lighttpd|80|conflict-web|Conflicts with Apache"
   "php-fpm|php-fpm|9000|info|Not required; Apache mod_php is used"
   "mariadb|mariadb|3306|required-db|VICIdial database"
   "mysql|mariadb|3306|conflict-db|Oracle MySQL collides with MariaDB"
@@ -757,11 +791,12 @@ detect_services() {
       case "$level" in
         conflict-web|conflict-db|conflict-tel)
           if [[ "$active" == "active" || "$listening" == "yes" ]]; then
-            # Leap 16: mysql.service is often an alias of mariadb — do not treat it as Oracle MySQL.
+            # Leap 16: mysql/mysqld are MariaDB aliases or share :3306 with mariadb.
+            # Do not treat our own MariaDB listener as Oracle MySQL.
             if [[ "$name" == mysql || "$name" == mysqld ]]; then
               local real_id=""
               real_id="$(systemctl show -p Id --value "${name}.service" 2>/dev/null || true)"
-              if [[ "$real_id" == "mariadb.service" ]]; then
+              if [[ "$real_id" == "mariadb.service" || "$(unit_state mariadb)" == "active" ]]; then
                 continue
               fi
             fi
@@ -807,7 +842,7 @@ detect_services() {
 
   # Catch anything else bound to VICIdial ports.
   local port
-  for port in 80 443 3306 5038 5060 4569; do
+  for port in 80 3306 5038 5060 4569; do
     if listening_on "$port" any; then
       info "Port ${port} is in use."
     fi
@@ -1287,14 +1322,17 @@ install_base_packages() {
   have_cmd make || die "make is required to compile Asterisk 18"
   have_cmd svn || have_cmd git || die "subversion or git is required to fetch VICIdial"
 
+  # Leap 16 renames: jansson-devel→libjansson-devel, openssl-devel→libopenssl-devel
+  # sqlite3-devel is ONLY for Asterisk astdb (internal). VICIdial app data is MariaDB.
   local devel=(
-    ncurses-devel libxml2-devel openssl-devel libopenssl-devel
-    sqlite3-devel sqlite-devel libuuid-devel speex-devel libcurl-devel
+    ncurses-devel libxml2-devel openssl-devel libopenssl-devel libopenssl-3-devel
+    libuuid-devel speex-devel libcurl-devel libedit-devel sqlite3-devel
     unixODBC-devel kernel-devel kernel-default-devel
-    libsrtp-devel jansson-devel newt-devel speexdsp-devel
+    libsrtp-devel jansson-devel libjansson-devel newt-devel speexdsp-devel
   )
   zypper_try_in "${devel[@]}" || true
 
+  # perl-Time-HiRes is core on Leap 16; nmap/sipsak are often absent from oss.
   local perlmods=(
     perl-DBI perl-DBD-mysql perl-DBD-MariaDB perl-Net-Telnet perl-Time-HiRes
     perl-IO-Socket-SSL perl-libwww-perl perl-Digest-MD5
@@ -1389,6 +1427,9 @@ max_heap_table_size = ${tmp_tbl}
 skip-name-resolve
 bind-address = 127.0.0.1
 explicit_defaults_for_timestamp = Off
+# VICIdial admin POSTs empty strings for int fields; STRICT_TRANS_TABLES
+# on MariaDB 10.11+ fatals and shows a blank page (e.g. agent update).
+sql_mode = NO_ENGINE_SUBSTITUTION
 character-set-server = utf8
 collation-server = utf8_unicode_ci
 CNF
@@ -1396,8 +1437,12 @@ CNF
   fi
   write_timestamp_cnf
   ensure_mariadb_running
-  ok "MariaDB ${MARIADB_VERSION:-installed}; TIMESTAMP implicit ON UPDATE restored"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    mysql_file -e "SET GLOBAL sql_mode='NO_ENGINE_SUBSTITUTION';" || true
+  fi
+  ok "MariaDB ${MARIADB_VERSION:-installed}; TIMESTAMP + sql_mode tuned for VICIdial"
 
+  local set_new_root=0
   if [[ "$LEGACY_PASSWORDS" -eq 1 ]]; then
     DB_PASS="${DB_PASS:-1234}"
     DB_CUSTOM_PASS="${DB_CUSTOM_PASS:-custom1234}"
@@ -1405,32 +1450,51 @@ CNF
     DB_PASS="${DB_PASS:-$(rand_pass)}"
     DB_CUSTOM_PASS="${DB_CUSTOM_PASS:-$(rand_pass)}"
   fi
+  # On re-run: reuse /root/.my.cnf. Generating a fresh -p here overrides .my.cnf
+  # and aborts the install right after the MariaDB PASS line.
   if [[ -z "$DB_ROOT_PASS" && "$LEGACY_PASSWORDS" -eq 0 ]]; then
-    DB_ROOT_PASS="$(rand_pass)"
+    if load_root_my_cnf_pass; then
+      info "Reusing MariaDB root password from /root/.my.cnf (re-run safe)"
+    else
+      DB_ROOT_PASS="$(rand_pass)"
+      set_new_root=1
+    fi
+  elif [[ -n "$DB_ROOT_PASS" && ! -f /root/.my.cnf ]]; then
+    set_new_root=1
   fi
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
+    # ALTER USER so re-runs update passwords to match the credentials file.
     mysql_file <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 CREATE USER IF NOT EXISTS '${DB_CUSTOM_USER}'@'localhost' IDENTIFIED BY '${DB_CUSTOM_PASS}';
+ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+ALTER USER '${DB_CUSTOM_USER}'@'localhost' IDENTIFIED BY '${DB_CUSTOM_PASS}';
 GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
 GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
 GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_CUSTOM_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
-    if [[ -n "$DB_ROOT_PASS" ]]; then
-      mysql_file -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;" || \
-        mysql_file -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${DB_ROOT_PASS}'); FLUSH PRIVILEGES;" || \
+    if [[ "$set_new_root" -eq 1 && -n "$DB_ROOT_PASS" ]]; then
+      # Connect without -p first (socket auth / empty root), then set password.
+      DB_ROOT_PASS_TMP="$DB_ROOT_PASS"
+      DB_ROOT_PASS=""
+      mysql_file -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS_TMP}'; FLUSH PRIVILEGES;" || \
         warn "Could not set MariaDB root password automatically"
+      DB_ROOT_PASS="$DB_ROOT_PASS_TMP"
+      unset DB_ROOT_PASS_TMP
       umask 077
       cat > /root/.my.cnf <<EOF
 [client]
 user=root
 password=${DB_ROOT_PASS}
 EOF
+      chmod 600 /root/.my.cnf
     fi
+    ok "Database ${DB_NAME} and app users ready"
   fi
 }
 
@@ -1450,15 +1514,556 @@ DB_CUSTOM_USER=${DB_CUSTOM_USER}
 DB_CUSTOM_PASS=${DB_CUSTOM_PASS}
 WEB_USER=6666
 WEB_PASS=1234
+# Agent UI: http://SERVER_IP/agc/vicidial.php
+AGENT_USER=8001
+AGENT_PASS=8001
+PHONE_LOGIN=8001
+PHONE_PASS=8001
+# Also created: agent/phone 6001/6001 and 7001/7001
+DEMO_CAMPAIGN=DEMOCAMP
 EOF
   chmod 600 "$CRED_FILE"
   ok "Credentials written to ${CRED_FILE}"
+}
+
+# Demo agent users + SIP phones so /agc/vicidial.php works out of the box.
+# Classic lab IDs: 8001 (primary), 6001, 7001 — user/pass/phone_login all match.
+ensure_demo_agent_phones() {
+  header "Demo agent users + phones (8001 / 6001 / 7001)"
+  [[ "$DRY_RUN" -eq 1 ]] && { info "(dry-run) would ensure demo agents/phones"; return 0; }
+  local tables sip
+  tables="$(mysql_exec -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name='phones';" 2>/dev/null || echo 0)"
+  if [[ "${tables:-0}" -lt 1 ]]; then
+    warn "phones table missing — skip demo agents"
+    return 0
+  fi
+
+  SERVER_IP="${SERVER_IP:-$(detect_primary_ip)}"
+  [[ -n "$SERVER_IP" ]] || { warn "No SERVER_IP — skip demo agents"; return 0; }
+  local gmt
+  gmt="$(mysql_exec -N -e "SELECT local_gmt FROM ${DB_NAME}.servers WHERE server_ip='${SERVER_IP}' LIMIT 1;" 2>/dev/null || true)"
+  gmt="${gmt:--5.00}"
+
+  mysql_file --database="$DB_NAME" <<SQL
+INSERT INTO vicidial_user_groups (
+  user_group, group_name, allowed_campaigns, forced_timeclock_login, shift_enforcement,
+  agent_status_viewable_groups, allowed_reports, admin_viewable_groups,
+  agent_ip_list, admin_ip_list, api_ip_list
+) SELECT 'AGENTS', 'Demo Agents', ' -ALL-CAMPAIGNS- - -', 'N', 'OFF',
+  ' --ALL-GROUPS-- ', 'ALL REPORTS', ' ---ALL--- ', '', '', ''
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_user_groups WHERE user_group='AGENTS');
+
+UPDATE vicidial_user_groups SET
+  allowed_campaigns=' -ALL-CAMPAIGNS- - -',
+  agent_ip_list='',
+  forced_timeclock_login='N',
+  shift_enforcement='OFF'
+WHERE user_group='AGENTS';
+
+INSERT INTO vicidial_campaigns (
+  campaign_id, campaign_name, active, dial_method, auto_dial_level,
+  dial_timeout, campaign_cid, campaign_vdad_exten, local_call_time, campaign_recording,
+  hopper_level, lead_order, dial_statuses, no_hopper_leads_logins, no_hopper_dialing
+) SELECT 'DEMOCAMP', 'Demo Campaign', 'Y', 'MANUAL', '0',
+  '60', '0000000000', '8368', '24hours', 'ONDEMAND',
+  100, 'DOWN', ' NEW -', 'Y', 'Y'
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_campaigns WHERE campaign_id='DEMOCAMP');
+
+UPDATE vicidial_campaigns SET
+  active='Y', dial_method='MANUAL', auto_dial_level='0', hopper_level=100,
+  lead_order=IFNULL(NULLIF(lead_order,''),'DOWN'), dial_statuses=' NEW -',
+  local_call_time='24hours', no_hopper_leads_logins='Y', no_hopper_dialing='Y'
+WHERE campaign_id='DEMOCAMP';
+
+INSERT INTO vicidial_lists (list_id, list_name, campaign_id, active, list_description)
+SELECT 1001, 'USA Demo Leads', 'DEMOCAMP', 'Y', 'Installer demo — USA phone_code=1 only'
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_lists WHERE list_id=1001);
+
+UPDATE vicidial_lists SET
+  list_name='USA Demo Leads', campaign_id='DEMOCAMP', active='Y',
+  list_description='Installer demo — USA phone_code=1 only'
+WHERE list_id=1001;
+SQL
+
+  # USA-only demo leads (NANP fiction 555-01xx). Idempotent via source_id=USA-DEMO.
+  local usa_count
+  usa_count="$(mysql_exec -N -e "SELECT COUNT(*) FROM ${DB_NAME}.vicidial_list WHERE list_id=1001 AND source_id='USA-DEMO';" 2>/dev/null || echo 0)"
+  if [[ "${usa_count:-0}" -lt 1 ]]; then
+    mysql_file --database="$DB_NAME" <<'SQL'
+INSERT INTO vicidial_list (
+  entry_date, status, user, vendor_lead_code, source_id, list_id, gmt_offset_now,
+  called_since_last_reset, phone_code, phone_number, title, first_name, middle_initial, last_name,
+  address1, city, state, postal_code, country_code, gender, email, comments, called_count, rank, owner, entry_list_id
+) VALUES
+(NOW(),'NEW','','USA001','USA-DEMO',1001,-5.00,'N','1','2125550101','MR','James','A','Wilson','100 Broadway','New York','NY','10005','USA','M','james.wilson@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA002','USA-DEMO',1001,-5.00,'N','1','2125550102','MS','Emily','B','Johnson','200 Park Ave','New York','NY','10166','USA','F','emily.johnson@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA003','USA-DEMO',1001,-8.00,'N','1','3105550103','MR','Michael','C','Brown','3400 Ocean Ave','Los Angeles','CA','90291','USA','M','michael.brown@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA004','USA-DEMO',1001,-8.00,'N','1','4155550104','MS','Sarah','D','Davis','500 Market St','San Francisco','CA','94105','USA','F','sarah.davis@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA005','USA-DEMO',1001,-6.00,'N','1','3125550105','MR','Robert','E','Miller','233 S Wacker Dr','Chicago','IL','60606','USA','M','robert.miller@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA006','USA-DEMO',1001,-6.00,'N','1','2145550106','MS','Amanda','F','Garcia','1201 Elm St','Dallas','TX','75270','USA','F','amanda.garcia@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA007','USA-DEMO',1001,-6.00,'N','1','7135550107','MR','David','G','Martinez','910 Louisiana St','Houston','TX','77002','USA','M','david.martinez@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA008','USA-DEMO',1001,-5.00,'N','1','3055550108','MS','Jessica','H','Rodriguez','100 Biscayne Blvd','Miami','FL','33132','USA','F','jessica.rodriguez@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA009','USA-DEMO',1001,-5.00,'N','1','4045550109','MR','Christopher','I','Lee','1 Atlantic Station','Atlanta','GA','30363','USA','M','chris.lee@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA010','USA-DEMO',1001,-5.00,'N','1','6175550110','MS','Ashley','J','Walker','1 Federal St','Boston','MA','02110','USA','F','ashley.walker@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA011','USA-DEMO',1001,-5.00,'N','1','2025550111','MR','Daniel','K','Hall','1600 Pennsylvania Ave','Washington','DC','20500','USA','M','daniel.hall@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA012','USA-DEMO',1001,-7.00,'N','1','6025550112','MS','Lauren','L','Allen','2 N Central Ave','Phoenix','AZ','85004','USA','F','lauren.allen@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA013','USA-DEMO',1001,-8.00,'N','1','2065550113','MR','Matthew','M','Young','1201 3rd Ave','Seattle','WA','98101','USA','M','matthew.young@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA014','USA-DEMO',1001,-7.00,'N','1','3035550114','MS','Nicole','N','King','1700 Broadway','Denver','CO','80202','USA','F','nicole.king@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA015','USA-DEMO',1001,-5.00,'N','1','2155550115','MR','Andrew','O','Wright','1601 Market St','Philadelphia','PA','19103','USA','M','andrew.wright@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA016','USA-DEMO',1001,-8.00,'N','1','7025550116','MS','Megan','P','Lopez','3700 W Flamingo Rd','Las Vegas','NV','89103','USA','F','megan.lopez@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA017','USA-DEMO',1001,-6.00,'N','1','6125550117','MR','Joshua','Q','Hill','90 S 7th St','Minneapolis','MN','55402','USA','M','joshua.hill@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA018','USA-DEMO',1001,-5.00,'N','1','7045550118','MS','Stephanie','R','Scott','100 N Tryon St','Charlotte','NC','28202','USA','F','stephanie.scott@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA019','USA-DEMO',1001,-5.00,'N','1','3135550119','MR','Ryan','S','Green','1 Campus Martius','Detroit','MI','48226','USA','M','ryan.green@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA020','USA-DEMO',1001,-6.00,'N','1','8165550120','MS','Brittany','T','Adams','1200 Main St','Kansas City','MO','64105','USA','F','brittany.adams@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA021','USA-DEMO',1001,-6.00,'N','1','5045550121','MR','Justin','U','Baker','1 Canal St','New Orleans','LA','70130','USA','M','justin.baker@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA022','USA-DEMO',1001,-8.00,'N','1','5035550122','MS','Rachel','V','Nelson','111 SW 5th Ave','Portland','OR','97204','USA','F','rachel.nelson@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA023','USA-DEMO',1001,-7.00,'N','1','8015550123','MR','Brandon','W','Carter','15 W South Temple','Salt Lake City','UT','84101','USA','M','brandon.carter@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA024','USA-DEMO',1001,-6.00,'N','1','9015550124','MS','Heather','X','Mitchell','100 Peabody Pl','Memphis','TN','38103','USA','F','heather.mitchell@example.com','USA demo lead',0,0,'',0),
+(NOW(),'NEW','','USA025','USA-DEMO',1001,-5.00,'N','1','7575550125','MR','Kevin','Y','Perez','150 W Main St','Norfolk','VA','23510','USA','M','kevin.perez@example.com','USA demo lead',0,0,'',0);
+SQL
+    ok "Loaded 25 USA-only demo leads into list 1001 (DEMOCAMP)"
+  else
+    info "USA demo leads already present on list 1001 (${usa_count})"
+  fi
+
+  # Seed hopper so agent login is not blocked by empty hopper
+  mysql_file --database="$DB_NAME" <<'SQL'
+DELETE FROM vicidial_hopper WHERE campaign_id='DEMOCAMP';
+INSERT INTO vicidial_hopper (lead_id, campaign_id, status, user, list_id, gmt_offset_now, state, alt_dial, priority, source, vendor_lead_code)
+SELECT lead_id, 'DEMOCAMP', 'READY', '', list_id, gmt_offset_now, IFNULL(state,''), 'NONE', 0, 'S', IFNULL(vendor_lead_code,'')
+FROM vicidial_list
+WHERE list_id IN (SELECT list_id FROM vicidial_lists WHERE campaign_id='DEMOCAMP' AND active='Y')
+  AND status='NEW' AND called_since_last_reset='N'
+ORDER BY lead_id LIMIT 100;
+SQL
+  if [[ -x /usr/share/astguiclient/AST_VDhopper.pl ]]; then
+    /usr/share/astguiclient/AST_VDhopper.pl >/dev/null 2>&1 || true
+  fi
+
+  local id
+  for id in 8001 6001 7001; do
+    mysql_file --database="$DB_NAME" <<SQL
+INSERT INTO phones (
+  extension, dialplan_number, voicemail_id, server_ip, login, pass, status, active,
+  phone_type, fullname, protocol, local_gmt, outbound_cid, template_id, conf_secret,
+  user_group, is_webphone
+) SELECT '${id}','${id}','${id}','${SERVER_IP}','${id}','${id}','ACTIVE','Y',
+  'Demo Agent Phone','Demo Agent ${id}','SIP','${gmt}','0000000000','','${id}',
+  '---ALL---','N'
+FROM DUAL WHERE NOT EXISTS (
+  SELECT 1 FROM phones WHERE extension='${id}' AND server_ip='${SERVER_IP}'
+);
+
+UPDATE phones SET
+  dialplan_number='${id}', voicemail_id='${id}', login='${id}', pass='${id}',
+  status='ACTIVE', active='Y', phone_type='Demo Agent Phone', fullname='Demo Agent ${id}',
+  protocol='SIP', conf_secret='${id}',
+  outbound_cid=IFNULL(NULLIF(outbound_cid,''),'0000000000'),
+  local_gmt='${gmt}', user_group='---ALL---', is_webphone='N'
+WHERE extension='${id}' AND server_ip='${SERVER_IP}';
+
+INSERT INTO vicidial_users (
+  user, pass, full_name, user_level, user_group, phone_login, phone_pass,
+  active, force_change_password, api_only_user
+) SELECT '${id}','${id}','Demo Agent ${id}',1,'AGENTS','${id}','${id}','Y','N','0'
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_users WHERE user='${id}');
+
+UPDATE vicidial_users SET
+  pass='${id}', full_name='Demo Agent ${id}', user_level=IF(user_level<1,1,user_level),
+  user_group='AGENTS', phone_login='${id}', phone_pass='${id}',
+  active='Y', force_change_password='N', api_only_user='0',
+  failed_login_count=0, failed_login_attempts_today=0, failed_login_count_today=0,
+  failed_last_ip_today='', failed_last_type_today=''
+WHERE user='${id}';
+SQL
+  done
+
+  mysql_file --database="$DB_NAME" -e \
+    "UPDATE servers SET rebuild_conf_files='Y', generate_vicidial_conf='Y' WHERE server_ip='${SERVER_IP}';" \
+    || true
+
+  if [[ -x /usr/share/astguiclient/ADMIN_keepalive_ALL.pl ]]; then
+    /usr/share/astguiclient/ADMIN_keepalive_ALL.pl --CONFERENCES --quiet >/dev/null 2>&1 || true
+    if have_cmd asterisk; then
+      asterisk -rx "sip reload" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  ok "Demo agents ready — agent 8001/8001 phone 8001/8001 (also 6001, 7001)"
+  info "Agent login: http://${SERVER_IP}/agc/vicidial.php — campaign DEMOCAMP"
+  info "USA demo list 1001: 25 leads, phone_code=1 (e.g. 2125550101)"
+
+  ensure_confbridge_sessions || true
+}
+
+# Asterisk 18 has no MeetMe — use ConfBridge, and point conference rooms at the real server IP
+# (sample schema ships rooms on 10.10.10.15 which causes "no available sessions").
+ensure_confbridge_sessions() {
+  header "ConfBridge agent sessions"
+  [[ "$DRY_RUN" -eq 1 ]] && { info "(dry-run) would fix ConfBridge sessions"; return 0; }
+  SERVER_IP="${SERVER_IP:-$(detect_primary_ip)}"
+  [[ -n "$SERVER_IP" ]] || { warn "No SERVER_IP — skip ConfBridge fix"; return 0; }
+
+  local tables
+  tables="$(mysql_exec -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name='vicidial_conferences';" 2>/dev/null || echo 0)"
+  if [[ "${tables:-0}" -lt 1 ]]; then
+    warn "vicidial_conferences missing — skip ConfBridge fix"
+    return 0
+  fi
+
+  local old_ip
+  old_ip="$(mysql_exec -N -e "SELECT server_ip FROM ${DB_NAME}.vicidial_conferences WHERE server_ip<>'${SERVER_IP}' GROUP BY server_ip LIMIT 1;" 2>/dev/null || true)"
+
+  if [[ -n "$old_ip" && -x /usr/share/astguiclient/ADMIN_update_server_ip.pl ]]; then
+    info "Rewriting conference server_ip ${old_ip} → ${SERVER_IP}"
+    /usr/share/astguiclient/ADMIN_update_server_ip.pl --auto \
+      --old-server_ip="$old_ip" --server_ip="$SERVER_IP" >/dev/null 2>&1 || true
+  fi
+
+  mysql_file --database="$DB_NAME" <<SQL
+UPDATE conferences SET server_ip='${SERVER_IP}' WHERE server_ip<>'${SERVER_IP}';
+UPDATE vicidial_conferences SET server_ip='${SERVER_IP}' WHERE server_ip<>'${SERVER_IP}';
+UPDATE vicidial_conferences SET extension='' WHERE server_ip='${SERVER_IP}';
+
+UPDATE servers SET
+  conf_engine='CONFBRIDGE',
+  active='Y',
+  active_asterisk_server='Y',
+  active_agent_login_server='Y',
+  rebuild_conf_files='Y',
+  generate_vicidial_conf='Y'
+WHERE server_ip='${SERVER_IP}';
+
+DELETE FROM vicidial_confbridges WHERE server_ip='${SERVER_IP}';
+INSERT INTO vicidial_confbridges (conf_exten, server_ip, extension, leave_3way)
+SELECT conf_exten, server_ip, '', '0'
+FROM vicidial_conferences
+WHERE server_ip='${SERVER_IP}';
+SQL
+
+  if [[ -x /usr/share/astguiclient/ADMIN_keepalive_ALL.pl ]]; then
+    /usr/share/astguiclient/ADMIN_keepalive_ALL.pl --CONFERENCES >/dev/null 2>&1 || true
+  fi
+  if have_cmd asterisk; then
+    asterisk -rx "module reload app_confbridge.so" >/dev/null 2>&1 || true
+    asterisk -rx "dialplan reload" >/dev/null 2>&1 || true
+  fi
+
+  local free
+  free="$(mysql_exec -N -e "SELECT COUNT(*) FROM ${DB_NAME}.vicidial_confbridges WHERE server_ip='${SERVER_IP}' AND (extension IS NULL OR extension='');" 2>/dev/null || echo 0)"
+  ok "ConfBridge ready — ${free} free agent sessions on ${SERVER_IP}"
+}
+
+# Original VICIdial web admin (HTTP Basic Auth): user 6666 / pass 1234 with full rights.
+ensure_default_admin_full_access() {
+  header "Default admin 6666 — full access"
+  [[ "$DRY_RUN" -eq 1 ]] && { info "(dry-run) would ensure admin 6666/1234 full access"; return 0; }
+  local tables
+  tables="$(mysql_exec -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name='vicidial_users';" 2>/dev/null || echo 0)"
+  if [[ "${tables:-0}" -lt 1 ]]; then
+    warn "vicidial_users missing — skip default admin (load schema first)"
+    return 0
+  fi
+  mysql_file --database="$DB_NAME" <<'SQL'
+INSERT INTO vicidial_users (
+  user, pass, full_name, user_level, user_group, active, force_change_password,
+  modify_users, modify_campaigns, modify_lists, modify_servers, view_reports,
+  ast_admin_access, alter_admin_interface_options, modify_same_user_level
+) SELECT '6666','1234','Admin',9,'ADMIN','Y','N','1','1','1','1','1','1','1','1'
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_users WHERE user='6666');
+
+UPDATE vicidial_users SET
+  pass='1234',
+  full_name='Admin',
+  user_level=9,
+  user_group='ADMIN',
+  active='Y',
+  force_change_password='N',
+  api_only_user='0',
+  delete_users='1',
+  delete_user_groups='1',
+  delete_lists='1',
+  delete_campaigns='1',
+  delete_ingroups='1',
+  delete_remote_agents='1',
+  load_leads='1',
+  campaign_detail='1',
+  ast_admin_access='1',
+  ast_delete_phones='1',
+  delete_scripts='1',
+  modify_leads='1',
+  hotkeys_active='1',
+  change_agent_campaign='1',
+  agent_choose_ingroups='1',
+  scheduled_callbacks='1',
+  agentonly_callbacks='1',
+  agentcall_manual='1',
+  vicidial_recording='1',
+  vicidial_transfers='1',
+  delete_filters='1',
+  alter_agent_interface_options='1',
+  closer_default_blended='1',
+  delete_call_times='1',
+  modify_call_times='1',
+  modify_users='1',
+  modify_campaigns='1',
+  modify_lists='1',
+  modify_scripts='1',
+  modify_filters='1',
+  modify_ingroups='1',
+  modify_usergroups='1',
+  modify_remoteagents='1',
+  modify_servers='1',
+  view_reports='1',
+  qc_enabled='1',
+  qc_pass='1',
+  qc_finish='1',
+  qc_commit='1',
+  add_timeclock_log='1',
+  modify_timeclock_log='1',
+  delete_timeclock_log='1',
+  modify_inbound_dids='1',
+  delete_inbound_dids='1',
+  download_lists='1',
+  manager_shift_enforcement_override='1',
+  shift_override_flag='1',
+  export_reports='1',
+  delete_from_dnc='1',
+  allow_alerts='1',
+  callcard_admin='1',
+  modify_shifts='1',
+  modify_phones='1',
+  modify_carriers='1',
+  modify_labels='1',
+  modify_statuses='1',
+  modify_voicemail='1',
+  modify_audiostore='1',
+  modify_moh='1',
+  modify_tts='1',
+  modify_contacts='1',
+  modify_same_user_level='1',
+  agentcall_email='1',
+  modify_email_accounts='1',
+  alter_admin_interface_options='1',
+  modify_custom_dialplans='1',
+  modify_languages='1',
+  modify_colors='1',
+  modify_auto_reports='1',
+  download_invalid_files='1',
+  modify_dial_prefix='1',
+  hci_enabled='1',
+  modify_settings_containers='1',
+  export_gdpr_leads='1',
+  vdc_agent_api_access='1',
+  modify_ip_lists='1',
+  ignore_ip_list='1'
+WHERE user='6666';
+SQL
+  ok "Default admin 6666 / 1234 has full access (original VICIdial Basic Auth login)"
+}
+
+# Dynamic portal IP validation: enable Allow IP Lists, keep PORTAL_DYNAMIC in sync
+# with the current public/LAN IP, and bind it to ADMIN web access.
+ensure_dynamic_portal_ip_validation() {
+  header "Dynamic portal IP validation"
+  [[ "$DRY_RUN" -eq 1 ]] && { info "(dry-run) would enable portal IP lists"; return 0; }
+
+  SERVER_IP="${SERVER_IP:-$(detect_primary_ip)}"
+  PUBLIC_IP="${PUBLIC_IP:-$SERVER_IP}"
+  local tables
+  tables="$(mysql_exec -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DB_NAME}' AND table_name='vicidial_ip_lists';" 2>/dev/null || echo 0)"
+  if [[ "${tables:-0}" -lt 1 ]]; then
+    warn "vicidial_ip_lists missing — skip portal IP validation"
+    return 0
+  fi
+
+  # Discover current addresses (LAN + public + localhost for webserver callbacks).
+  local -a ips=()
+  local cand
+  for cand in "$SERVER_IP" "$PUBLIC_IP" "127.0.0.1" "$(detect_primary_ip 2>/dev/null || true)"; do
+    [[ -n "$cand" ]] || continue
+    [[ "$cand" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    ips+=("$cand")
+  done
+  # Optional: public IP via metadata/DNS if different
+  if have_cmd curl; then
+    cand="$(curl -4 -fsS -m 3 https://ifconfig.me/ip 2>/dev/null || curl -4 -fsS -m 3 https://api.ipify.org 2>/dev/null || true)"
+    if [[ "$cand" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      ips+=("$cand")
+      PUBLIC_IP="${PUBLIC_IP:-$cand}"
+    fi
+  fi
+  # Unique
+  local uniq="" ip
+  for ip in "${ips[@]}"; do
+    [[ " $uniq " == *" $ip "* ]] && continue
+    uniq+=" $ip"
+  done
+  ips=($uniq)
+  [[ ${#ips[@]} -gt 0 ]] || { warn "No IPs detected for portal list"; return 0; }
+
+  info "Portal IP whitelist: ${ips[*]}"
+
+  mysql_file --database="$DB_NAME" <<SQL
+UPDATE system_settings SET allow_ip_lists='1' WHERE allow_ip_lists IS NOT NULL;
+
+INSERT INTO vicidial_ip_lists (ip_list_id, ip_list_name, active, user_group)
+SELECT 'PORTAL_DYNAMIC', 'Dynamic portal whitelist (auto)', 'Y', '---ALL---'
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vicidial_ip_lists WHERE ip_list_id='PORTAL_DYNAMIC');
+
+UPDATE vicidial_ip_lists SET active='Y', ip_list_name='Dynamic portal whitelist (auto)' WHERE ip_list_id='PORTAL_DYNAMIC';
+
+DELETE FROM vicidial_ip_list_entries WHERE ip_list_id='PORTAL_DYNAMIC';
+SQL
+
+  for ip in "${ips[@]}"; do
+    mysql_file --database="$DB_NAME" -e \
+      "INSERT INTO vicidial_ip_list_entries (ip_list_id, ip_address) VALUES ('PORTAL_DYNAMIC','${ip}');" \
+      || true
+  done
+
+  # ADMIN group: portal (admin) access must match whitelist. Agents stay open (empty).
+  mysql_file --database="$DB_NAME" <<'SQL'
+UPDATE vicidial_user_groups
+  SET admin_ip_list='PORTAL_DYNAMIC'
+  WHERE user_group='ADMIN';
+UPDATE vicidial_users
+  SET modify_ip_lists='1', ignore_ip_list='1'
+  WHERE user='6666';
+SQL
+
+  # Helper: refresh whitelist + optional ADMIN_update_server_ip when the host IP changes.
+  local helper="/usr/local/sbin/vicidial-portal-ip-sync.sh"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    mkdir -p /usr/local/sbin /var/log/astguiclient
+    cat > "$helper" <<'HELPER'
+#!/usr/bin/env bash
+# Keep VICIdial PORTAL_DYNAMIC IP list + VARserver_ip in sync with this host.
+set -euo pipefail
+CONF="${ASTGUI_CONF:-/etc/astguiclient.conf}"
+LOG="${VICI_IP_SYNC_LOG:-/var/log/astguiclient/portal-ip-sync.log}"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG" >/dev/null; }
+
+new_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+[[ -z "$new_ip" ]] && new_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+pub_ip="$(curl -4 -fsS -m 3 https://ifconfig.me/ip 2>/dev/null || true)"
+[[ "$pub_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || pub_ip=""
+
+old_ip=""
+if [[ -f "$CONF" ]]; then
+  old_ip="$(awk -F= '/^VARserver_ip=/{print $2; exit}' "$CONF" | tr -d ' \t\r')"
+fi
+[[ -n "$new_ip" ]] || { log "ERROR: could not detect local IP"; exit 1; }
+
+mysql_cli=(mysql -N -B)
+have_mariadb=0
+command -v mariadb >/dev/null 2>&1 && { mysql_cli=(mariadb -N -B); have_mariadb=1; }
+
+db_exec() { "${mysql_cli[@]}" -u root "$@" 2>/dev/null; }
+
+db_exec asterisk -e "UPDATE system_settings SET allow_ip_lists='1';" || true
+db_exec asterisk -e "INSERT IGNORE INTO vicidial_ip_lists (ip_list_id,ip_list_name,active,user_group) VALUES ('PORTAL_DYNAMIC','Dynamic portal whitelist (auto)','Y','---ALL---');" || true
+db_exec asterisk -e "UPDATE vicidial_ip_lists SET active='Y' WHERE ip_list_id='PORTAL_DYNAMIC';" || true
+
+# Refresh entries: localhost + LAN + public
+db_exec asterisk -e "DELETE FROM vicidial_ip_list_entries WHERE ip_list_id='PORTAL_DYNAMIC';" || true
+for ip in 127.0.0.1 "$new_ip" $pub_ip; do
+  [[ -n "$ip" ]] || continue
+  db_exec asterisk -e "INSERT INTO vicidial_ip_list_entries (ip_list_id,ip_address) VALUES ('PORTAL_DYNAMIC','${ip}');" || true
+done
+db_exec asterisk -e "UPDATE vicidial_user_groups SET admin_ip_list='PORTAL_DYNAMIC' WHERE user_group='ADMIN';" || true
+
+log "Portal IP list synced (local=${new_ip} public=${pub_ip:-none} previous=${old_ip:-none})"
+
+if [[ -n "$old_ip" && "$old_ip" != "$new_ip" && -x /usr/share/astguiclient/ADMIN_update_server_ip.pl ]]; then
+  log "Server IP changed ${old_ip} → ${new_ip}; running ADMIN_update_server_ip.pl"
+  /usr/share/astguiclient/ADMIN_update_server_ip.pl --auto \
+    --old-server_ip="$old_ip" --server_ip="$new_ip" >>"$LOG" 2>&1 || \
+    log "WARN: ADMIN_update_server_ip.pl failed"
+fi
+HELPER
+    chmod 755 "$helper"
+
+    # Prefer systemd timer (Leap 16 / minimal images often have no cronie).
+    if have_cmd systemctl; then
+      cat > /etc/systemd/system/vicidial-portal-ip-sync.service <<'UNIT'
+[Unit]
+Description=VICIdial dynamic portal IP list sync
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vicidial-portal-ip-sync.sh
+UNIT
+      cat > /etc/systemd/system/vicidial-portal-ip-sync.timer <<'UNIT'
+[Unit]
+Description=Hourly VICIdial portal IP validation sync
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+      systemctl daemon-reload || true
+      systemctl enable --now vicidial-portal-ip-sync.timer || true
+      systemctl start vicidial-portal-ip-sync.service || true
+      info "systemd timer: vicidial-portal-ip-sync.timer (hourly + after boot)"
+    fi
+
+    # Also install cron entries when cron directories exist (or after installing cronie).
+    local cronf=""
+    if [[ -d /etc/cron.d ]]; then
+      cronf="/etc/cron.d/vicidial-portal-ip"
+    elif [[ -d /var/spool/cron/tabs ]]; then
+      cronf="/var/spool/cron/tabs/root"
+    elif [[ -d /var/spool/cron ]]; then
+      mkdir -p /var/spool/cron
+      cronf="/var/spool/cron/root"
+    fi
+    if [[ -n "$cronf" ]]; then
+      if [[ "$cronf" == /etc/cron.d/* ]]; then
+        cat > "$cronf" <<'CRON'
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+@reboot root /usr/local/sbin/vicidial-portal-ip-sync.sh
+15 * * * * root /usr/local/sbin/vicidial-portal-ip-sync.sh
+CRON
+        chmod 644 "$cronf"
+      else
+        touch "$cronf"
+        if ! grep -q 'vicidial-portal-ip-sync.sh' "$cronf" 2>/dev/null; then
+          cat >> "$cronf" <<'CRON'
+### VICIdial dynamic portal IP validation
+@reboot /usr/local/sbin/vicidial-portal-ip-sync.sh
+15 * * * * /usr/local/sbin/vicidial-portal-ip-sync.sh
+CRON
+          chmod 600 "$cronf"
+        fi
+      fi
+    fi
+  fi
+
+  ok "Dynamic portal IP validation enabled (list PORTAL_DYNAMIC → ADMIN admin_ip_list)"
+  info "6666 has ignore_ip_list=1 so default admin cannot lock itself out"
+  info "Sync helper: /usr/local/sbin/vicidial-portal-ip-sync.sh (systemd timer and/or cron)"
 }
 
 ensure_kernel_build_dir() {
   local kver="${1:-$(uname -r)}"
   local build="/lib/modules/${kver}/build"
   if [[ -f "${build}/Makefile" ]]; then
+    # Refuse mismatched headers (e.g. running .36 with linked .37 tree).
+    local hdr=""
+    hdr="$(readlink -f "$build" 2>/dev/null || true)"
+    if [[ -n "$hdr" && "$hdr" != *"${kver%-default}"* && "$hdr" != *"${kver}"* ]]; then
+      warn "Kernel build dir ${build} → ${hdr} does not match running ${kver}"
+      return 1
+    fi
     ok "Kernel headers present for ${kver}"
     return 0
   fi
@@ -1470,19 +2075,8 @@ ensure_kernel_build_dir() {
     ok "Kernel headers installed for ${kver}"
     return 0
   fi
-  local obj=""
-  obj="$(ls -d /usr/src/linux-*-obj/*/default /usr/src/linux-obj/*/default 2>/dev/null | head -n1 || true)"
-  mkdir -p "/lib/modules/${kver}"
-  if [[ -n "$obj" ]]; then
-    ln -sfn "$obj" "$build"
-  elif [[ -d /usr/src/linux ]]; then
-    ln -sfn /usr/src/linux "$build"
-  fi
-  if [[ -f "${build}/Makefile" ]]; then
-    ok "Linked kernel build dir ${build}"
-    return 0
-  fi
-  warn "No matching kernel headers for ${kver} (DAHDI skip is OK on a Cloud VM)."
+  # Do not symlink a different kernel's obj dir — DAHDI will fail to compile.
+  warn "No matching kernel headers for ${kver} (DAHDI skip is OK on a Cloud VM). Reboot into a kernel that has -devel installed if you need MeetMe/DAHDI."
   return 1
 }
 
@@ -1530,10 +2124,31 @@ install_dahdi() {
 }
 
 install_libpri() {
-  if pkg_installed libpri1 || pkg_installed libpri; then
-    return
+  if pkg_installed libpri1 || pkg_installed libpri || [[ -f /usr/lib64/libpri.so || -f /usr/lib/libpri.so ]]; then
+    ok "libpri already present"
+    return 0
   fi
-  zypper_n in -y libpri1 libpri-devel || true
+  zypper_n in -y libpri1 libpri-devel || zypper_try_in libpri1 libpri-devel || true
+  if pkg_installed libpri1 || pkg_installed libpri || [[ -f /usr/lib64/libpri.so || -f /usr/lib/libpri.so ]]; then
+    return 0
+  fi
+  info "Building libpri from source (${LIBPRI_SRC_URL})"
+  mkdir -p "$SRC_DIR/libpri-build"
+  (
+    cd "$SRC_DIR/libpri-build"
+    [[ -f libpri.tar.gz ]] || wget -O libpri.tar.gz "$LIBPRI_SRC_URL"
+    tar xf libpri.tar.gz
+    local tree
+    tree="$(find "$SRC_DIR/libpri-build" -maxdepth 1 -type d -name 'libpri-*' | sort | tail -n1)"
+    [[ -n "$tree" ]] || die "libpri source tree not found"
+    # Utilities (pridump) need dahdi/user.h — not required for Asterisk. Build libs only.
+    make -C "$tree" libpri.a libpri.so.1.4
+    make -C "$tree" install
+    ldconfig
+  )
+  [[ -f /usr/lib64/libpri.so || -f /usr/lib/libpri.so || -f /usr/local/lib/libpri.so ]] \
+    || die "libpri install failed"
+  ok "libpri installed from source"
 }
 
 asterisk_already_ok() {
@@ -1552,16 +2167,37 @@ install_asterisk() {
   if asterisk_already_ok && [[ "$FORCE" -eq 0 ]]; then
     ok "Asterisk ${ASTERISK_VERSION} already matches major ${REQ_ASTERISK_MAJOR}"
     info "Re-run with --force to rebuild and re-patch"
+    ensure_asterisk_systemd_unit
     return
   fi
   install_libpri
   mkdir -p "$SRC_DIR/asterisk-build"
   (
     cd "$SRC_DIR/asterisk-build"
-    run wget -O asterisk-18-current.tar.gz "$ASTERISK_SRC_URL"
-    run tar xf asterisk-18-current.tar.gz
+    local tarball="asterisk-18.tar.gz" url=""
+    # Reject tiny/HTML leftovers from a prior 404 download.
+    if [[ -f "$tarball" ]] && ! tar tzf "$tarball" >/dev/null 2>&1; then
+      warn "Removing corrupt ${tarball}"
+      rm -f "$tarball"
+    fi
+    if [[ ! -f "$tarball" ]]; then
+      for url in \
+        "$ASTERISK_SRC_URL" \
+        "https://downloads.asterisk.org/pub/telephony/asterisk/old-releases/asterisk-18.26.4.tar.gz"
+      do
+        info "Trying Asterisk source: $url"
+        if wget -O "$tarball" "$url" && tar tzf "$tarball" >/dev/null 2>&1; then
+          break
+        fi
+        rm -f "$tarball"
+      done
+      [[ -f "$tarball" ]] || die "Could not download Asterisk 18 (use old-releases/asterisk-18.26.4.tar.gz)"
+    else
+      info "Reusing existing ${SRC_DIR}/asterisk-build/${tarball}"
+    fi
+    run tar xf "$tarball"
     local tree
-    tree="$(find "$SRC_DIR/asterisk-build" -maxdepth 1 -type d -name 'asterisk-18*' | sort | tail -n1)"
+    tree="$(find "$SRC_DIR/asterisk-build" -maxdepth 1 -type d -name 'asterisk-18*' | sort -V | tail -n1)"
     [[ -n "$tree" ]] || die "Asterisk 18 source tree not found"
     cd "$tree"
     info "Downloading VICIdial Asterisk 18 patches"
@@ -1576,10 +2212,20 @@ install_asterisk() {
     patch < sip_peer_status-18.patch channels/chan_sip.c || warn "sip patch skipped"
     patch < timeout_reset_dial_app-18.patch apps/app_dial.c || warn "dial app patch skipped"
     patch < timeout_reset_dial_core-18.patch main/dial.c || warn "dial core patch skipped"
+    # Asterisk 18.26+ renamed Dial() timeout vars (to/orig → to_answer/orig_answer_to).
+    if grep -q '\*to = orig;' apps/app_dial.c 2>/dev/null; then
+      info "Adapting timeout_reset dial patch for Asterisk 18.26+ API"
+      sed -i \
+        -e 's/\*to = orig;/*to_answer = orig_answer_to;/' \
+        -e 's/Dial Tiemout Reset/Dial Timeout Reset/g' \
+        apps/app_dial.c
+    fi
 
     contrib/scripts/install_prereq install || warn "Asterisk install_prereq reported issues"
-    run ./configure --libdir=/usr/lib64 --with-gsm=internal --with-ssl --enable-asteriskssl \
-      --with-pjproject-bundled --with-jansson-bundled
+    # OpenSSL libs for crypto; do NOT enable Asterisk TLS / Apache HTTPS.
+    # sqlite3 is Asterisk astdb only — VICIdial lives in MariaDB.
+    run ./configure --libdir=/usr/lib64 --with-gsm=internal --with-ssl \
+      LDFLAGS='-L/usr/lib64' --with-pjproject-bundled --with-jansson-bundled
     run make menuselect.makeopts
     local enable
     for enable in app_meetme app_confbridge res_http_websocket res_srtp res_timing_dahdi \
@@ -1597,8 +2243,139 @@ install_asterisk() {
   if [[ -f /etc/asterisk/modules.conf ]]; then
     sed -i 's/^noload *= *chan_sip.so/;noload = chan_sip.so/' /etc/asterisk/modules.conf || true
   fi
+  ensure_asterisk_systemd_unit
   detect_asterisk
   ok "Asterisk installed: ${ASTERISK_VERSION:-unknown}"
+}
+
+ensure_asterisk_systemd_unit() {
+  ensure_asterisk
+}
+
+ensure_asterisk() {
+  # SETUP: unit + chan_sip + enable/start (same pattern as ensure_apache / MariaDB).
+  header "Asterisk telephony — check unit, enable chan_sip, start"
+  [[ "$DRY_RUN" -eq 1 ]] && { info "(dry-run) would ensure Asterisk systemd unit + start"; return 0; }
+  if ! have_cmd asterisk; then
+    warn "asterisk binary not found — run install (Phase 6) first"
+    return 1
+  fi
+
+  mkdir -p /run/asterisk /var/run/asterisk /var/log/asterisk /var/spool/asterisk /var/lib/asterisk
+
+  # VICIdial uses classic chan_sip (Asterisk samples noload it for PJSIP).
+  if [[ -f /etc/asterisk/modules.conf ]]; then
+    sed -i 's/^noload *= *chan_sip.so/;noload = chan_sip.so/' /etc/asterisk/modules.conf || true
+    ok "chan_sip enabled in modules.conf"
+  fi
+
+  local unit_file="/etc/systemd/system/asterisk.service"
+  if [[ ! -f "$unit_file" ]] && [[ ! -f /usr/lib/systemd/system/asterisk.service ]]; then
+    info "Creating ${unit_file}"
+  fi
+  # Always (re)write our known-good unit so Leap source builds get enable+start.
+  cat > "$unit_file" <<'UNIT'
+[Unit]
+Description=Asterisk PBX (VICIdial)
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+Environment=HOME=/var/lib/asterisk
+WorkingDirectory=/var/lib/asterisk
+ExecStartPre=-/bin/mkdir -p /run/asterisk /var/log/asterisk /var/spool/asterisk
+ExecStart=/usr/sbin/asterisk -g -vvvg
+ExecReload=/usr/sbin/asterisk -rx 'core reload'
+ExecStop=/usr/sbin/asterisk -rx 'core stop gracefully'
+PIDFile=/run/asterisk/asterisk.pid
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  if have_cmd systemctl; then
+    systemctl daemon-reload || true
+    if ! ensure_unit asterisk 40; then
+      warn "asterisk.service did not become active — try: asterisk -vvvg &"
+      # Last resort: start binary so CLI works for lab boxes
+      if [[ "$(unit_state asterisk)" != "active" ]] && ! pgrep -x asterisk >/dev/null 2>&1; then
+        /usr/sbin/asterisk -g -vvvg || true
+        sleep 2
+      fi
+    fi
+  else
+    pgrep -x asterisk >/dev/null 2>&1 || /usr/sbin/asterisk -g -vvvg || true
+  fi
+
+  # Load chan_sip if Asterisk is up but module was noloaded at start
+  if [[ -S /run/asterisk/asterisk.ctl ]] || [[ -S /var/run/asterisk/asterisk.ctl ]]; then
+    asterisk -rx 'module show like chan_sip.so' 2>/dev/null | grep -q 'chan_sip' || \
+      asterisk -rx 'module load chan_sip.so' >/dev/null 2>&1 || true
+  fi
+
+  detect_asterisk
+  if [[ -S /run/asterisk/asterisk.ctl ]] || [[ -S /var/run/asterisk/asterisk.ctl ]]; then
+    ok "Asterisk ${ASTERISK_VERSION:-ok} running (use: asterisk -r)"
+    return 0
+  fi
+  warn "Asterisk installed but remote console socket missing"
+  return 1
+}
+
+cmd_setup() {
+  need_root
+  header "SETUP — enable and start VICIdial services"
+  phase_detect
+  confirm "Run SETUP (Apache/MariaDB/Asterisk/portal IP) on $(host_name)?" || die "Aborted"
+
+  case "$ROLE" in
+    express|all|web)
+      ensure_apache || true
+      ;;
+  esac
+  case "$ROLE" in
+    express|all|database|web)
+      ensure_mariadb_running || true
+      ;;
+  esac
+  case "$ROLE" in
+    express|all|telephony)
+      ensure_asterisk || true
+      ;;
+  esac
+  if have_cmd systemctl; then
+    ensure_unit chronyd 15 || warn "chronyd not active"
+  fi
+
+  # Portal IP + default admin + demo agents when DB is reachable
+  if wait_for_mariadb_ping 5 2>/dev/null; then
+    ensure_default_admin_full_access || true
+    ensure_demo_agent_phones || true
+    ensure_dynamic_portal_ip_validation || true
+  else
+    warn "MariaDB not ready — skipped portal IP / admin / demo agent SETUP"
+  fi
+
+  # Boot hook so Asterisk comes back after reboot
+  local rc="/etc/rc.d/rc.local"
+  [[ -f /etc/rc.local ]] && rc="/etc/rc.local"
+  if [[ -d "$(dirname "$rc")" ]]; then
+    touch "$rc"
+    chmod +x "$rc"
+    ensure_line "$rc" "#!/bin/bash"
+    if [[ -x /usr/share/astguiclient/start_asterisk_boot.pl ]]; then
+      ensure_line "$rc" "/usr/share/astguiclient/start_asterisk_boot.pl"
+    fi
+  fi
+
+  cmd_verify_soft
+  info "SETUP done. Connect with: asterisk -r"
+  info "Admin: http://${SERVER_IP:-$(detect_primary_ip)}/vicidial/admin.php (6666 / 1234)"
+  info "Agent: http://${SERVER_IP:-$(detect_primary_ip)}/agc/vicidial.php (8001 / 8001, phone 8001 / 8001)"
 }
 
 checkout_vicidial() {
@@ -1633,6 +2410,8 @@ load_schema_if_empty() {
     if [[ -n "$first" ]]; then
       mysql_file --database="$DB_NAME" -f < "$first" || warn "first_server_install.sql reported errors"
     fi
+    ensure_default_admin_full_access
+    ensure_demo_agent_phones
   fi
 }
 
@@ -1704,16 +2483,21 @@ CRON
 
 configure_firewall() {
   [[ "$SKIP_FIREWALL" -eq 0 ]] || { info "Skipping firewall"; return; }
-  header "Phase 9 — Firewall ports"
+  header "Phase 9 — Firewall ports (HTTP only — no SSL/443)"
   if have_cmd firewall-cmd && [[ "$(unit_state firewalld)" == "active" ]]; then
     local p
-    for p in 80/tcp 443/tcp 22/tcp 5060/tcp 5060/udp 4569/udp 5038/tcp; do
+    # Explicitly HTTP only. Do not open 443 / https.
+    firewall-cmd --permanent --remove-service=https >/dev/null 2>&1 || true
+    firewall-cmd --permanent --remove-port=443/tcp >/dev/null 2>&1 || true
+    for p in 80/tcp 22/tcp 5060/tcp 5060/udp 4569/udp 5038/tcp; do
       run firewall-cmd --permanent --add-port="$p" || true
     done
+    run firewall-cmd --permanent --add-service=http || true
     run firewall-cmd --permanent --add-port=10000-20000/udp || true
     run firewall-cmd --reload || true
-    ok "firewalld ports opened (HTTP/S, SIP, IAX, AMI, RTP 10000-20000)"
+    ok "firewalld ports opened (HTTP :80, SIP, IAX, AMI, RTP 10000-20000) — SSL/443 disabled"
     info "Leave 3306 closed to the internet on a single Express box"
+    info "Access VICIdial at http://SERVER_IP/vicidial/welcome.php (not https)"
   else
     warn "firewalld not active; configure SIP 5060 and RTP 10000-20000 UDP yourself"
   fi
@@ -1889,8 +2673,12 @@ cmd_verify_soft() {
   else
     warn "VICIdial web directory not found"
   fi
-  info "Admin UI: http://${SERVER_IP:-$(detect_primary_ip)}/vicidial/welcome.php"
-  info "Default login 6666 / 1234 — change immediately"
+  info "Admin UI: http://${SERVER_IP:-$(detect_primary_ip)}/vicidial/admin.php"
+  info "Default admin (original Basic Auth): 6666 / 1234 — full access; change immediately"
+  info "Agent UI: http://${SERVER_IP:-$(detect_primary_ip)}/agc/vicidial.php"
+  info "Demo agent: user 8001 / pass 8001 — phone login 8001 / pass 8001 (also 6001, 7001)"
+  info "Demo campaign: DEMOCAMP — USA list 1001 (25 demo numbers, phone_code=1)"
+  info "Portal IP validation: Allow IP Lists + PORTAL_DYNAMIC (synced hourly)"
   info "Credentials file: ${CRED_FILE}"
 }
 
@@ -1929,10 +2717,14 @@ cmd_install() {
       configure_mariadb
       install_dahdi
       install_asterisk
+      ensure_asterisk
       checkout_vicidial
       load_schema_if_empty
       migrate_schema_chain
       run_install_pl
+      ensure_default_admin_full_access
+      ensure_demo_agent_phones
+      ensure_dynamic_portal_ip_validation
       install_crontab_and_boot
       configure_firewall
       write_credentials
@@ -1943,6 +2735,9 @@ cmd_install() {
       checkout_vicidial
       load_schema_if_empty
       migrate_schema_chain
+      ensure_default_admin_full_access
+      ensure_demo_agent_phones
+      ensure_dynamic_portal_ip_validation
       write_credentials
       ;;
     web)
@@ -1951,6 +2746,9 @@ cmd_install() {
       ensure_apache
       checkout_vicidial
       run_install_pl
+      ensure_default_admin_full_access
+      ensure_demo_agent_phones
+      ensure_dynamic_portal_ip_validation
       write_credentials
       configure_firewall
       ;;
@@ -1958,6 +2756,7 @@ cmd_install() {
       install_base_packages
       install_dahdi
       install_asterisk
+      ensure_asterisk
       checkout_vicidial
       run_install_pl
       install_crontab_and_boot
@@ -2017,10 +2816,14 @@ init_paths() {
 main() {
   parse_args "$@"
   init_paths
+  if [[ "$COMMAND" == "install" || "$COMMAND" == "migrate" || "$COMMAND" == "setup" ]]; then
+    trap 'trap_err $LINENO "$BASH_COMMAND"' ERR
+  fi
   case "$COMMAND" in
     help) usage ;;
     detect) cmd_detect ;;
     check) cmd_check ;;
+    setup) cmd_setup ;;
     install) cmd_install ;;
     migrate) cmd_migrate ;;
     iso-verify|download-iso|write-usb)

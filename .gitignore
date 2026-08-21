@@ -1,3 +1,11 @@
+# Local export archives
+VICI-export.tar.gz
+*.tar.gz
+
+# Uploaded Vici9 bundle (may contain site-specific secrets)
+vici9install.zip
+vici9-extracted/
+
 # Logs
 logs
 *.log
