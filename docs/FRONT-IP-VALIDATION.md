@@ -200,7 +200,7 @@ Timer:
 systemctl status vicidial-portal-ip-sync.timer
 journalctl -u vicidial-portal-ip-sync.service -n 50
 ```
-
+//
 ---
 
 ## Security notes
