@@ -44,6 +44,7 @@ Also see:
 - **[FRONT-IP-VALIDATION.md](FRONT-IP-VALIDATION.md)** — portal IP whitelist (`scripts/vicidial-front-ip.sh`)
 - **[HETZNER-RESCUE.md](HETZNER-RESCUE.md)** — Rescue `installimage`, no ISO, RAM-full wget
 - **[INTERVIEW.md](INTERVIEW.md)** — ports, firewall, commands, install issues, Q&A
+- **[SCRIPTS-ROMAN-URDU.md](SCRIPTS-ROMAN-URDU.md)** — `scripts/vicidial-front-ip.sh` poori detail (Roman Urdu)
 
 ---
 
@@ -88,7 +89,10 @@ VICI/
 ├── docs/INSTALL.md                    # This guide
 ├── docs/HETZNER-RESCUE.md             # Rescue installimage, skip ViciBox ISO
 ├── docs/INTERVIEW.md                  # Ports, firewall, commands, interview Q&A
+├── docs/SCRIPTS-ROMAN-URDU.md         # scripts/ folder — Roman Urdu, har command
 ├── docs/FRONT-IP-VALIDATION.md        # Portal IP whitelist
+├── scripts/vicidial-front-ip.sh       # Admin IP whitelist tool
+├── scripts/README.md                  # Short pointer to Roman Urdu docs
 ├── conf/requirements.conf             # Version/hardware targets (sourced by installer)
 ├── install-vicidial12-opensuse.sh     # Main installer (run this)
 └── .gitignore

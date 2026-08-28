@@ -16,6 +16,9 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 **Interview: ports, firewall, commands, install failures:**  
 → **[docs/INTERVIEW.md](docs/INTERVIEW.md)**
 
+**`scripts/` folder — har command Roman Urdu mein (IP whitelist tool):**  
+→ **[docs/SCRIPTS-ROMAN-URDU.md](docs/SCRIPTS-ROMAN-URDU.md)** · `scripts/vicidial-front-ip.sh`
+
 | Layer | Installed |
 | --- | --- |
 | OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |
