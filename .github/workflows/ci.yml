@@ -43,6 +43,7 @@ jobs:
           test -f docs/VICI9-EXTRACTED-ROMAN-URDU.md
           test -f docs/PACKAGES-ROMAN-URDU.md
           test -f docs/PORT-IP-CHANGE-ROMAN-URDU.md
+          test -f docs/LOGS-ROMAN-URDU.md
           test -f scripts/README.md
           test -f conf/requirements.conf
           test -x install-vicidial12-opensuse.sh

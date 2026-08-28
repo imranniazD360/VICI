@@ -8,20 +8,24 @@ Also: [INSTALL.md](INSTALL.md) · [HETZNER-RESCUE.md](HETZNER-RESCUE.md) · [FRO
 
 ## Ports (memorize)
 
-| Port | Protocol | Use | Public? |
-| --- | --- | --- | --- |
-| **22** | TCP | SSH | Yes, restrict to your IP |
-| **80** | TCP | Admin + agent HTTP | Yes |
-| **443** | TCP | HTTPS | **No** in this installer |
-| **3306** | TCP | MariaDB | **No** on Express |
-| **5038** | TCP | AMI (Asterisk Manager) | **No** on WAN |
-| **5060** | UDP + TCP | SIP | Yes (phones + carrier) |
-| **4569** | UDP | IAX | If IAX trunk |
-| **10000–20000** | UDP | RTP (audio) | **Yes** or one-way audio |
+
+| Port            | Protocol  | Use                    | Public?                  |
+| --------------- | --------- | ---------------------- | ------------------------ |
+| **22**          | TCP       | SSH                    | Yes, restrict to your IP |
+| **80**          | TCP       | Admin + agent HTTP     | Yes                      |
+| **443**         | TCP       | HTTPS                  | **No** in this installer |
+| **3306**        | TCP       | MariaDB                | **No** on Express        |
+| **5038**        | TCP       | AMI (Asterisk Manager) | **No** on WAN            |
+| **5060**        | UDP + TCP | SIP                    | Yes (phones + carrier)   |
+| **4569**        | UDP       | IAX                    | If IAX trunk             |
+| **10000–20000** | UDP       | RTP (audio)            | **Yes** or one-way audio |
+
 
 One line: web **80** · SIP **5060** · RTP **10000–20000 UDP** · DB **3306 closed** · AMI **5038 closed**.
 
 Kaise **badlein** (SIP port, `externip`, `ADMIN_update_server_ip.pl`): **[PORT-IP-CHANGE-ROMAN-URDU.md](PORT-IP-CHANGE-ROMAN-URDU.md)**
+
+**Logs kahan:** [LOGS-ROMAN-URDU.md](LOGS-ROMAN-URDU.md) — `journalctl -u asterisk`, `/var/log/asterisk/full`, installer `/var/log/vicidial-installer/`.
 
 Hetzner has **two** firewalls: cloud/Robot **and** `firewalld`. Both must allow SIP/RTP.
 
@@ -45,14 +49,18 @@ firewall-cmd --reload
 
 Do **not** open 3306 to the internet.
 
-| Symptom | Likely port |
-| --- | --- |
-| Phone will not register | 5060 |
-| Registered, no audio | RTP 10000–20000 UDP |
-| Admin page dead | 80 |
-| DB / AMI exposed | 3306 or 5038 left open |
+
+| Symptom                 | Likely port            |
+| ----------------------- | ---------------------- |
+| Phone will not register | 5060                   |
+| Registered, no audio    | RTP 10000–20000 UDP    |
+| Admin page dead         | 80                     |
+| DB / AMI exposed        | 3306 or 5038 left open |
+
 
 ---
+
+
 
 ## Daily commands
 
@@ -87,27 +95,33 @@ Never `zypper dup` on a dialer — only `zypper up`.
 
 ---
 
+
+
 ## Architecture (say this)
 
 Roles: **express** (DB+web+telephony) · **database** · **web** · **telephony** · **archive**.
 
 Browser → Apache/PHP → MariaDB. Phone → SIP/RTP. Perl keepalives → AMI **5038** + DB. Hopper = `AST_VDhopper.pl`.
 
-| Path | What |
-| --- | --- |
-| `/usr/src/astguiclient/trunk` | SVN |
-| `/usr/share/astguiclient` | Perl |
-| `/srv/www/htdocs/vicidial` | Admin |
-| `/srv/www/htdocs/agc` | Agent |
-| `/etc/asterisk/sip-vicidial.conf` | Generated SIP |
-| `/etc/asterisk/confbridge-vicidial.conf` | ConfBridge |
-| `/root/vicidial-credentials.txt` | Secrets |
+
+| Path                                     | What          |
+| ---------------------------------------- | ------------- |
+| `/usr/src/astguiclient/trunk`            | SVN           |
+| `/usr/share/astguiclient`                | Perl          |
+| `/srv/www/htdocs/vicidial`               | Admin         |
+| `/srv/www/htdocs/agc`                    | Agent         |
+| `/etc/asterisk/sip-vicidial.conf`        | Generated SIP |
+| `/etc/asterisk/confbridge-vicidial.conf` | ConfBridge    |
+| `/root/vicidial-credentials.txt`         | Secrets       |
+
 
 SVN: `svn://svn.eflo.net:3690/agc_2-X/trunk`
 
 Lab logins (change immediately): admin `http://IP/vicidial/admin.php` **6666** / **1234** · agent `http://IP/agc/vicidial.php` **8001** / **8001** campaign **DEMOCAMP**. Softphone must REGISTER before agent UI (`UNKNOWN` = no login).
 
 ---
+
+
 
 ## Q&A — Linux
 
@@ -118,6 +132,8 @@ Lab logins (change immediately): admin `http://IP/vicidial/admin.php` **6666** /
 **Port in use?** `ss -lntp | grep 80` then stop nginx (`--stop-conflicts`).
 
 ---
+
+
 
 ## Q&A — install
 
@@ -137,11 +153,13 @@ Lab logins (change immediately): admin `http://IP/vicidial/admin.php` **6666** /
 
 ---
 
+
+
 ## Install / first-boot problems
 
-**Rescue: `No space left` on ISO wget** — Rescue `/` is tmpfs. Delete partial ISO. Use `installimage` Leap. See [HETZNER-RESCUE.md](HETZNER-RESCUE.md).
+**Rescue:** `No space left` **on ISO wget** — Rescue `/` is tmpfs. Delete partial ISO. Use `installimage` Leap. See [HETZNER-RESCUE.md](HETZNER-RESCUE.md).
 
-**Still `root@rescue` after reboot** — `installimage` did not finish; EFI vs BIOS; `SWRAID 0` on one disk.
+**Still** `root@rescue` **after reboot** — `installimage` did not finish; EFI vs BIOS; `SWRAID 0` on one disk.
 
 **Installer: not OpenSUSE** — you installed Ubuntu/Debian/Rocky.
 
@@ -155,13 +173,13 @@ Lab logins (change immediately): admin `http://IP/vicidial/admin.php` **6666** /
 
 **SVN hang** — TCP **3690** or `svn.eflo.net`.
 
-**`screen -ls` empty** — crontab/timer not running `ADMIN_keepalive_ALL.pl`.
+`screen -ls` **empty** — crontab/timer not running `ADMIN_keepalive_ALL.pl`.
 
 **Admin 404** — files not in `/srv/www/htdocs/vicidial`; DocumentRoot.
 
 **IP list lockout** — `6666` has `ignore_ip_list=1`. Others need **PORTAL_DYNAMIC**. Tool: `scripts/vicidial-front-ip.sh`.
 
-**`no available sessions: ||IP|8001|SIP/8001|`** — conferences still on sample **`10.10.10.15`**, or MeetMe on Asterisk 18. Fix:
+`no available sessions: ||IP|8001|SIP/8001|` — conferences still on sample `10.10.10.15`, or MeetMe on Asterisk 18. Fix:
 
 ```bash
 /usr/share/astguiclient/ADMIN_update_server_ip.pl --auto \
@@ -170,7 +188,7 @@ Lab logins (change immediately): admin `http://IP/vicidial/admin.php` **6666** /
 
 Set `servers.conf_engine=CONFBRIDGE`, rebuild conf, `module reload app_confbridge.so`.
 
-**`no leads in the hopper`** — list inactive, hopper empty, `no_hopper_leads_logins`. Seed hopper; `AST_VDhopper.pl`.
+`no leads in the hopper` — list inactive, hopper empty, `no_hopper_leads_logins`. Seed hopper; `AST_VDhopper.pl`.
 
 **Peer UNKNOWN** — `asterisk -rx "sip show peer 8001"`: secret, 5060, NAT, firewall.
 
@@ -184,6 +202,8 @@ Set `servers.conf_engine=CONFBRIDGE`, rebuild conf, `module reload app_confbridg
 
 ---
 
+
+
 ## Campaign / DB (expert)
 
 Hopper = short queue in `vicidial_hopper` from `vicidial_list` (GMT, DNC, status `NEW`).
@@ -196,17 +216,23 @@ AMI **5038** = Asterisk control plane; lock to localhost/LAN.
 
 ---
 
+
+
 ## Security
 
 Change **6666/1234** before the box is public. No 3306/5038 on WAN. Admin IP lists. SSH keys. VICIdial is **AGPL**.
 
 ---
 
+
+
 ## 60-second Hetzner answer
 
 Rescue RAM cannot hold the 2 GB ViciBox ISO. Use `installimage` **Opensuse-1600-amd64-base**, `SWRAID 0`, reboot into Leap, `zypper up`, then this installer: Apache, PHP, MariaDB TIMESTAMP fix, DAHDI, patched Asterisk 18, ConfBridge, VICIdial 2.14 from SVN. Set `--server-ip` and `--public-ip`. Open 80/5060/RTP. Keep 3306 closed. Register softphone until `sip show peers` is OK. Change default admin password.
 
 ---
+
+
 
 ## Asaan Roman Urdu (interview bolo)
 
@@ -225,6 +251,8 @@ Agent login se pehle phone **REGISTER**. `sip show peer 8001` UNKNOWN nahi.
 `zypper dup` mat chalao. `screen -ls` khali = dialer keepalive nahi chal raha.
 
 ---
+
+
 
 ## Questions to ask *them*
 
