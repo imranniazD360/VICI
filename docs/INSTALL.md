@@ -39,7 +39,11 @@ Step-by-step documentation for the **VICI** scratch installer (`install-vicidial
 18. [Installer history (git)](#18-installer-history-git)
 19. [Safety rules](#19-safety-rules)
 
-Also see: **[FRONT-IP-VALIDATION.md](FRONT-IP-VALIDATION.md)** — portal IP whitelist tool (`scripts/vicidial-front-ip.sh`).
+Also see:
+
+- **[FRONT-IP-VALIDATION.md](FRONT-IP-VALIDATION.md)** — portal IP whitelist (`scripts/vicidial-front-ip.sh`)
+- **[HETZNER-RESCUE.md](HETZNER-RESCUE.md)** — Rescue `installimage`, no ISO, RAM-full wget
+- **[INTERVIEW.md](INTERVIEW.md)** — ports, firewall, commands, install issues, Q&A
 
 ---
 
@@ -82,6 +86,9 @@ Always run as **root**. Use `zypper up` only — **never** `zypper dup` on a dia
 VICI/
 ├── README.md                          # Short overview
 ├── docs/INSTALL.md                    # This guide
+├── docs/HETZNER-RESCUE.md             # Rescue installimage, skip ViciBox ISO
+├── docs/INTERVIEW.md                  # Ports, firewall, commands, interview Q&A
+├── docs/FRONT-IP-VALIDATION.md        # Portal IP whitelist
 ├── conf/requirements.conf             # Version/hardware targets (sourced by installer)
 ├── install-vicidial12-opensuse.sh     # Main installer (run this)
 └── .gitignore

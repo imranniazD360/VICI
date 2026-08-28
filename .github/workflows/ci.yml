@@ -37,6 +37,8 @@ jobs:
           test -f README.md
           test -f docs/INSTALL.md
           test -f docs/FRONT-IP-VALIDATION.md
+          test -f docs/HETZNER-RESCUE.md
+          test -f docs/INTERVIEW.md
           test -f conf/requirements.conf
           test -x install-vicidial12-opensuse.sh
           test -x scripts/vicidial-front-ip.sh

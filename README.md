@@ -10,6 +10,12 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 **Front / portal IP validation (Vici9-style dynamic whitelist for VICI12):**  
 → **[docs/FRONT-IP-VALIDATION.md](docs/FRONT-IP-VALIDATION.md)** · tool: `scripts/vicidial-front-ip.sh`
 
+**Hetzner Rescue (no ViciBox ISO — Leap 16 + this installer):**  
+→ **[docs/HETZNER-RESCUE.md](docs/HETZNER-RESCUE.md)**
+
+**Interview: ports, firewall, commands, install failures:**  
+→ **[docs/INTERVIEW.md](docs/INTERVIEW.md)**
+
 | Layer | Installed |
 | --- | --- |
 | OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |
