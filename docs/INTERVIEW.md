@@ -23,9 +23,9 @@ Also: [INSTALL.md](INSTALL.md) · [HETZNER-RESCUE.md](HETZNER-RESCUE.md) · [FRO
 
 One line: web **80** · SIP **5060** · RTP **10000–20000 UDP** · DB **3306 closed** · AMI **5038 closed**.
 
-Kaise **badlein** (SIP port, `externip`, `ADMIN_update_server_ip.pl`): **[PORT-IP-CHANGE-ROMAN-URDU.md](PORT-IP-CHANGE-ROMAN-URDU.md)**
+Kaise **badlein** (SIP port, `externip`, `ADMIN_update_server_ip.pl`): **[PORT-IP-CHANGE-ROMAN-URDU.md](PORT-IP-CHANGE-ROMAN-URDU.md)** · DNS: **[IP-DNS-ROMAN-URDU.md](IP-DNS-ROMAN-URDU.md)**
 
-**Logs kahan:** [LOGS-ROMAN-URDU.md](LOGS-ROMAN-URDU.md) — `journalctl -u asterisk`, `/var/log/asterisk/full`, installer `/var/log/vicidial-installer/`.
+**Logs kahan:** [LOGS-ROMAN-URDU.md](LOGS-ROMAN-URDU.md) · Asterisk: [ASTERISK-LOGS-ROMAN-URDU.md](ASTERISK-LOGS-ROMAN-URDU.md)
 
 Hetzner has **two** firewalls: cloud/Robot **and** `firewalld`. Both must allow SIP/RTP.
 

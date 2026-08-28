@@ -48,7 +48,9 @@ Also see:
 - **[VICI9-EXTRACTED-ROMAN-URDU.md](VICI9-EXTRACTED-ROMAN-URDU.md)** — purana Vici9 zip; VICI12 pe na chalao
 - **[PACKAGES-ROMAN-URDU.md](PACKAGES-ROMAN-URDU.md)** — har zypper package kyun (cifs-utils, PHP, DAHDI, …)
 - **[PORT-IP-CHANGE-ROMAN-URDU.md](PORT-IP-CHANGE-ROMAN-URDU.md)** — SIP/HTTP/RTP ports + server/public IP change
+- **[IP-DNS-ROMAN-URDU.md](IP-DNS-ROMAN-URDU.md)** — IP change + DNS (A record, resolv.conf, hostname)
 - **[LOGS-ROMAN-URDU.md](LOGS-ROMAN-URDU.md)** — server ke saare logs kahan aur kaise
+- **[ASTERISK-LOGS-ROMAN-URDU.md](ASTERISK-LOGS-ROMAN-URDU.md)** — Asterisk `full`, SIP/RTP debug
 
 ---
 
@@ -97,7 +99,9 @@ VICI/
 ├── docs/VICI9-EXTRACTED-ROMAN-URDU.md # vici9-extracted — Roman Urdu, har file
 ├── docs/PACKAGES-ROMAN-URDU.md        # zypper packages — kyun use (cifs-utils, …)
 ├── docs/PORT-IP-CHANGE-ROMAN-URDU.md  # ports + IP kaise badlein
+├── docs/IP-DNS-ROMAN-URDU.md          # IP change + DNS / hostname / A record
 ├── docs/LOGS-ROMAN-URDU.md            # journalctl, Asterisk, Apache, installer logs
+├── docs/ASTERISK-LOGS-ROMAN-URDU.md   # Asterisk full/messages, SIP/RTP debug
 ├── docs/FRONT-IP-VALIDATION.md        # Portal IP whitelist
 ├── scripts/vicidial-front-ip.sh       # Admin IP whitelist tool
 ├── scripts/README.md                  # Short pointer to Roman Urdu docs

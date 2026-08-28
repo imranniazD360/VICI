@@ -134,6 +134,8 @@ Verbose hamesha on mat chhodo — disk bhar jati hai.
 
 Logger: `/etc/asterisk/logger.conf` (`full` => `notice,warning,error,verbose,dtmf,fax`)
 
+**Asterisk-only poori guide (SIP debug, rtp debug, logger.conf):** [ASTERISK-LOGS-ROMAN-URDU.md](ASTERISK-LOGS-ROMAN-URDU.md)
+
 ---
 
 ## F. VICIdial Perl / keepalive

@@ -120,6 +120,8 @@ hostnamectl
 
 VICIdial `server_ip` hostname se **auto nahi** badalta — alag `ADMIN_update_server_ip.pl`.
 
+**DNS + A record + resolv.conf + externhost:** [IP-DNS-ROMAN-URDU.md](IP-DNS-ROMAN-URDU.md)
+
 ---
 
 ## B. Port kaise badlein

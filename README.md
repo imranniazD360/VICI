@@ -26,10 +26,10 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 → **[docs/PACKAGES-ROMAN-URDU.md](docs/PACKAGES-ROMAN-URDU.md)**
 
 **Port / IP kaise badlein (SIP 5060, RTP, externip, server_ip):**  
-→ **[docs/PORT-IP-CHANGE-ROMAN-URDU.md](docs/PORT-IP-CHANGE-ROMAN-URDU.md)**
+→ **[docs/PORT-IP-CHANGE-ROMAN-URDU.md](docs/PORT-IP-CHANGE-ROMAN-URDU.md)** · DNS/A-record: **[docs/IP-DNS-ROMAN-URDU.md](docs/IP-DNS-ROMAN-URDU.md)**
 
 **Server logs (Apache, Asterisk, MariaDB, installer — kahan dekhein):**  
-→ **[docs/LOGS-ROMAN-URDU.md](docs/LOGS-ROMAN-URDU.md)**
+→ **[docs/LOGS-ROMAN-URDU.md](docs/LOGS-ROMAN-URDU.md)** · Asterisk-only: **[docs/ASTERISK-LOGS-ROMAN-URDU.md](docs/ASTERISK-LOGS-ROMAN-URDU.md)**
 
 | Layer | Installed |
 | --- | --- |
