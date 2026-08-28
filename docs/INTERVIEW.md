@@ -238,7 +238,7 @@ Rescue RAM cannot hold the 2 GB ViciBox ISO. Use `installimage` **Opensuse-1600-
 
 Firewall = darwaza. Port band = traffic nahi.
 
-**Yaad:** `80` website · `5060` SIP · `10000-20000 UDP` awaaz · `3306` DB band · `5038` AMI band · `22` SSH.
+**Yaad:** `80` website · `5060` SIP · `10000-20000 UDP` Listed · `3306` DB band · `5038` AMI band · `22` SSH.
 
 Hetzner pe **do** firewall: panel + `firewalld`. Ek khol doosri band = call nahi.
 

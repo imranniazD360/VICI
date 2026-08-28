@@ -1,6 +1,6 @@
 # Port aur IP kaise badlein (Roman Urdu)
 
-VICI12 default: web **80**, SIP **5060**, awaaz **RTP 10000–20000 UDP**, AMI **5038**, IAX **4569**, DB **3306 band**. HTTPS **443 nahi**.
+VICI12 default: web **80**, SIP **5060**, Listed **RTP 10000–20000 UDP**, AMI **5038**, IAX **4569**, DB **3306 band**. HTTPS **443 nahi**.
 
 Teen jagah almost hamesha sath badlo:
 
@@ -159,7 +159,7 @@ VICIdial keepalive `sip-vicidial.conf` **peers** regenerate karta hai; **bindpor
 
 Admin UI: **Admin → Servers** pe SIP port field ho to wahan bhi match.
 
-### B2. RTP awaaz range (default 10000–20000)
+### B2. RTP Listed range (default 10000–20000)
 
 `/etc/asterisk/rtp.conf`:
 

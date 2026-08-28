@@ -1,6 +1,6 @@
 # Asterisk logs (Roman Urdu)
 
-Call / SIP / awaaz ka masla ho to **Asterisk logs**. Do jagah:
+Call / SIP / Listed ka masla ho to **Asterisk logs**. Do jagah:
 
 1. **systemd** — service start/crash: `journalctl -u asterisk`
 2. **Files** — call detail: `/var/log/asterisk/`
@@ -136,7 +136,7 @@ Log file mein INVITE, 401, 200 OK, ACK dikhega. 30 second call drop = ACK/NAT.
 
 ---
 
-## RTP / awaaz debug
+## RTP / Listed debug
 
 ```text
 rtp set debug on
