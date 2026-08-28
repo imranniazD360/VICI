@@ -45,6 +45,7 @@ Also see:
 - **[HETZNER-RESCUE.md](HETZNER-RESCUE.md)** — Rescue `installimage`, no ISO, RAM-full wget
 - **[INTERVIEW.md](INTERVIEW.md)** — ports, firewall, commands, install issues, Q&A
 - **[SCRIPTS-ROMAN-URDU.md](SCRIPTS-ROMAN-URDU.md)** — `scripts/vicidial-front-ip.sh` poori detail (Roman Urdu)
+- **[VICI9-EXTRACTED-ROMAN-URDU.md](VICI9-EXTRACTED-ROMAN-URDU.md)** — purana Vici9 zip; VICI12 pe na chalao
 
 ---
 
@@ -90,6 +91,7 @@ VICI/
 ├── docs/HETZNER-RESCUE.md             # Rescue installimage, skip ViciBox ISO
 ├── docs/INTERVIEW.md                  # Ports, firewall, commands, interview Q&A
 ├── docs/SCRIPTS-ROMAN-URDU.md         # scripts/ folder — Roman Urdu, har command
+├── docs/VICI9-EXTRACTED-ROMAN-URDU.md # vici9-extracted — Roman Urdu, har file
 ├── docs/FRONT-IP-VALIDATION.md        # Portal IP whitelist
 ├── scripts/vicidial-front-ip.sh       # Admin IP whitelist tool
 ├── scripts/README.md                  # Short pointer to Roman Urdu docs

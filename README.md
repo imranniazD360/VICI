@@ -19,6 +19,9 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 **`scripts/` folder — har command Roman Urdu mein (IP whitelist tool):**  
 → **[docs/SCRIPTS-ROMAN-URDU.md](docs/SCRIPTS-ROMAN-URDU.md)** · `scripts/vicidial-front-ip.sh`
 
+**`vici9-extracted/` — purana ViciBox 9 pack (is Leap box pe mat chalao):**  
+→ **[docs/VICI9-EXTRACTED-ROMAN-URDU.md](docs/VICI9-EXTRACTED-ROMAN-URDU.md)**
+
 | Layer | Installed |
 | --- | --- |
 | OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |

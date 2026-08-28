@@ -170,7 +170,8 @@ For a single Express box you do **not** need this.
 This dialer does **not** ship `/srv/www/vhosts/dynportal`. Do not run that script as-is on VICI12. Use `vicidial-front-ip.sh` instead.
 
 Extracted Vici9 files (reference): `/root/VICI/vici9-extracted/`  
-Original zip: `/root/VICI/vici9install.zip`
+Original zip: `/root/VICI/vici9install.zip`  
+Roman Urdu, har file: **[VICI9-EXTRACTED-ROMAN-URDU.md](VICI9-EXTRACTED-ROMAN-URDU.md)**
 
 ---
 
