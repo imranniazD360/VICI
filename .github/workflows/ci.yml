@@ -1,0 +1,44 @@
+# Runs automatically on every push and pull request to GitHub.
+# Repo → Actions tab to see results. No secrets required.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Check installer scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+
+      - name: Bash syntax
+        run: |
+          bash -n install-vicidial12-opensuse.sh
+          bash -n scripts/vicidial-front-ip.sh
+
+      - name: ShellCheck (warnings allowed)
+        run: |
+          shellcheck -S warning install-vicidial12-opensuse.sh || true
+          shellcheck -S warning scripts/vicidial-front-ip.sh || true
+
+      - name: Required files exist
+        run: |
+          test -f README.md
+          test -f docs/INSTALL.md
+          test -f docs/FRONT-IP-VALIDATION.md
+          test -f conf/requirements.conf
+          test -x install-vicidial12-opensuse.sh
+          test -x scripts/vicidial-front-ip.sh
+          grep -q 'install-vicidial12-opensuse.sh help' README.md
+          echo OK
