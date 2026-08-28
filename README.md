@@ -25,6 +25,9 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 **Packages (`cifs-utils`, apache, mariadb, gcc … kyun lagte hain):**  
 → **[docs/PACKAGES-ROMAN-URDU.md](docs/PACKAGES-ROMAN-URDU.md)**
 
+**Port / IP kaise badlein (SIP 5060, RTP, externip, server_ip):**  
+→ **[docs/PORT-IP-CHANGE-ROMAN-URDU.md](docs/PORT-IP-CHANGE-ROMAN-URDU.md)**
+
 | Layer | Installed |
 | --- | --- |
 | OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |
