@@ -86,7 +86,7 @@ VICI12 mein yahi roles: `--role express` vs `database` / `web` / `telephony`.
 - Comment: naye credentials (date script mein)
 - Baqi steps `/mnt/server_script/...` se files **copy** karti hain — mount fail = agla sab tootega
 
-VICI12: Storage Box zaroori nahi. SVN + packages net se aate hain.
+VICI12: Storage Box zaroori nahi. SVN + packages net se aate hain. **`cifs-utils` kyun:** [PACKAGES-ROMAN-URDU.md](PACKAGES-ROMAN-URDU.md).
 
 ### `2ndstep.sh` — time
 

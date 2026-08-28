@@ -22,6 +22,9 @@ Scratch-install VICIdial 12 on **stock openSUSE Leap 15.6 / 16.0**. It does **no
 **`vici9-extracted/` — purana ViciBox 9 pack (is Leap box pe mat chalao):**  
 → **[docs/VICI9-EXTRACTED-ROMAN-URDU.md](docs/VICI9-EXTRACTED-ROMAN-URDU.md)**
 
+**Packages (`cifs-utils`, apache, mariadb, gcc … kyun lagte hain):**  
+→ **[docs/PACKAGES-ROMAN-URDU.md](docs/PACKAGES-ROMAN-URDU.md)**
+
 | Layer | Installed |
 | --- | --- |
 | OS | openSUSE Leap **15.6** or **16.0** (Hetzner `installimage` or any Leap VPS) |

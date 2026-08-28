@@ -41,6 +41,7 @@ jobs:
           test -f docs/INTERVIEW.md
           test -f docs/SCRIPTS-ROMAN-URDU.md
           test -f docs/VICI9-EXTRACTED-ROMAN-URDU.md
+          test -f docs/PACKAGES-ROMAN-URDU.md
           test -f scripts/README.md
           test -f conf/requirements.conf
           test -x install-vicidial12-opensuse.sh

@@ -46,6 +46,7 @@ Also see:
 - **[INTERVIEW.md](INTERVIEW.md)** — ports, firewall, commands, install issues, Q&A
 - **[SCRIPTS-ROMAN-URDU.md](SCRIPTS-ROMAN-URDU.md)** — `scripts/vicidial-front-ip.sh` poori detail (Roman Urdu)
 - **[VICI9-EXTRACTED-ROMAN-URDU.md](VICI9-EXTRACTED-ROMAN-URDU.md)** — purana Vici9 zip; VICI12 pe na chalao
+- **[PACKAGES-ROMAN-URDU.md](PACKAGES-ROMAN-URDU.md)** — har zypper package kyun (cifs-utils, PHP, DAHDI, …)
 
 ---
 
@@ -92,6 +93,7 @@ VICI/
 ├── docs/INTERVIEW.md                  # Ports, firewall, commands, interview Q&A
 ├── docs/SCRIPTS-ROMAN-URDU.md         # scripts/ folder — Roman Urdu, har command
 ├── docs/VICI9-EXTRACTED-ROMAN-URDU.md # vici9-extracted — Roman Urdu, har file
+├── docs/PACKAGES-ROMAN-URDU.md        # zypper packages — kyun use (cifs-utils, …)
 ├── docs/FRONT-IP-VALIDATION.md        # Portal IP whitelist
 ├── scripts/vicidial-front-ip.sh       # Admin IP whitelist tool
 ├── scripts/README.md                  # Short pointer to Roman Urdu docs
